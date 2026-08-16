@@ -1,5 +1,11 @@
 appId: com.deepseek.dsh-electron
 productName: DeepSeek Harness Desktop
+# win-unpacked carries the bundled Node + dsh runtime (~700MB, ~32k files;
+# scripts/build-standalone.mjs slims the runtime to ~17k files). Compressing
+# with LZMA maximum makes NSIS itself very slow; store makes the installer huge
+# (reads back all 700MB on install, slow). normal is the best trade-off for
+# both build time and install time.
+compression: normal
 # No electronDist: electron-builder must download the per-arch Electron build
 # (cached under ~/Library/Caches/electron), otherwise every architecture gets
 # the host's local Electron distribution. The zip downloads go through
@@ -14,12 +20,20 @@ files:
   - out/**
   - package.json
 extraResources:
-  # The standalone CLI distribution (official Node + deployed dsh runtime)
-  # that the app launches as its `dsh web` child. Built by `pnpm run
-  # standalone` from the bundle; do not copy resources/dsh itself — it is
-  # embedded inside resources/dsh-standalone/runtime.
+  # The deployed dsh runtime only (no standalone Node — the app runs dsh with
+  # Electron's own embedded Node 24 via ELECTRON_RUN_AS_NODE, see
+  # src/main/index.ts). Built by `pnpm run standalone`; the standalone CLI
+  # distribution (official Node + this runtime) is a separate deliverable.
+  #
+  # `from` is resources/dsh-standalone (NOT .../runtime) so the runtime's
+  # node_modules is a SUB-directory of the copy source: electron-builder's file
+  # filter hard-excludes a source's root-level node_modules, which would drop
+  # the entire bundled dsh runtime (and with it lib/bin.js). The filter keeps
+  # the copy to the runtime subtree, leaving the ~90MB standalone node/ out.
   - from: resources/dsh-standalone
     to: dsh-standalone
+    filter:
+      - runtime{,/**/*}
 mac:
   target:
     - dmg
@@ -31,6 +45,14 @@ win:
   target:
     - nsis
     - zip
+  # No code-signing certificate is configured; explicitly skip the signing
+  # step. Otherwise electron-builder still walks the sign pipeline (fetching
+  # winCodeSign tooling and contacting the timestamp server), which stalls on
+  # restricted networks.
+  signExecutable: false
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
 linux:
   target:
     - AppImage

@@ -7,3 +7,5 @@ dist-exe-staging/
 # 构建产物与缓存,均可由 pnpm run bundle / standalone 重新生成:
 resources/
 bundle/
+# 用户手动拷贝的 deepseek-harness 产物快照（dist/dsh-runtime），不进版本库
+vendor/

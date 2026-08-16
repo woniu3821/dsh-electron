@@ -40,27 +40,27 @@ interface DshLaunch {
   shell?: boolean
 }
 
-/** The bundled dsh CLI entry inside the standalone distribution. */
-function standaloneCliPath(): string {
+/** The deployed dsh CLI entry (`lib/bin.js`) inside the bundled runtime. */
+function bundledBinPath(): string {
   const dir = app.isPackaged
-    ? join(process.resourcesPath, 'dsh-standalone')
-    : join(__dirname, '..', '..', 'resources', 'dsh-standalone')
-  return join(dir, process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
+    ? join(process.resourcesPath, 'dsh-standalone', 'runtime')
+    : join(__dirname, '..', '..', 'resources', 'dsh-standalone', 'runtime')
+  return join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 }
 
 /**
  * Resolve how to launch `dsh web`.
  *
- * The shell launches the standalone CLI distribution bundled with the app
- * (`resources/dsh-standalone`, built by `pnpm run standalone`): official Node
- * plus the deployed dsh runtime, so the packaged app needs no system Node.
- * The CLI launcher already passes `--expose-internals`, which dsh requires:
- * its plugin loader only falls back to Node's internal ESM loader when that
- * flag is present.
+ * The shell runs dsh with Electron's OWN embedded Node (Electron 43 embeds
+ * Node 24, inside dsh's engines range `^22.19.0 || >=24.0.0`) instead of
+ * bundling a separate Node runtime: it spawns `process.execPath` with
+ * `ELECTRON_RUN_AS_NODE=1` and `--expose-internals` (dsh's plugin loader only
+ * falls back to Node's internal ESM loader when that flag is present), pointing
+ * at the deployed runtime's `lib/bin.js` under `resources/dsh-standalone/runtime`.
+ * This drops the ~90MB standalone Node from the installer.
  *
  * Precedence: `DSH_EXE` (run an external binary as-is), `DSH_BIN` (run a
- * specific built `lib/bin.js` with Electron's embedded Node), then the
- * bundled CLI under `resources/dsh-standalone`.
+ * specific built `lib/bin.js`), then the bundled runtime's `lib/bin.js`.
  */
 function resolveDshLaunch(): DshLaunch {
   const exeOverride = process.env.DSH_EXE
@@ -70,22 +70,17 @@ function resolveDshLaunch(): DshLaunch {
   }
 
   const binOverride = process.env.DSH_BIN
-  if (binOverride !== undefined && binOverride !== '') {
-    if (!existsSync(binOverride)) throw new Error(`DSH_BIN does not exist: ${binOverride}`)
-    return {
-      command: process.execPath,
-      commandArgs: ['--expose-internals', binOverride],
-      env: { ELECTRON_RUN_AS_NODE: '1' },
-    }
-  }
-
-  const cliPath = standaloneCliPath()
-  if (!existsSync(cliPath)) {
+  const binPath = binOverride !== undefined && binOverride !== '' ? binOverride : bundledBinPath()
+  if (!existsSync(binPath)) {
     throw new Error(
-      `bundled dsh CLI is missing at ${cliPath}. Run \`pnpm run bundle && pnpm run standalone\` before building or launching.`,
+      `bundled dsh bin.js is missing at ${binPath}. Run \`pnpm run bundle && pnpm run standalone\` before building or launching.`,
     )
   }
-  return { command: cliPath, commandArgs: [], env: {}, shell: process.platform === 'win32' }
+  return {
+    command: process.execPath,
+    commandArgs: ['--expose-internals', binPath],
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+  }
 }
 
 /** Reserve one free loopback port, then release it for the child process. */

@@ -1,13 +1,14 @@
 # dsh-electron
 
-DeepSeek Harness 桌面壳。它把 `deepseek-harness` 的 `dsh web` 运行时作为**子进程**启动，再把子进程提供的 Web UI 加载进 Electron 窗口。打包逻辑全部在本仓库：`deepseek-harness` 只被**只读**使用——不提交任何改动、不修改任何跟踪文件（`scripts/bundle-dsh.mjs` 只在其目录里写入被 gitignore 的 `node_modules` 与构建产物）。
+DeepSeek Harness 桌面壳。它把 `deepseek-harness` 的 `dsh web` 运行时作为**子进程**启动，再把子进程提供的 Web UI 加载进 Electron 窗口。**两个仓库完全解耦**：`deepseek-harness` 只需手动执行 `npm run build`；本仓库的 `scripts/export-dsh.mjs` 只**读取**其构建产物、生成不含源码的产物快照（`vendor/dsh-runtime/`），之后的一切（物化、独立 CLI、Electron 打包）都在本仓库完成——`deepseek-harness` 零改动。
 
 ## 结构
 
 ```
 src/main/index.ts       主进程：拉起 dsh web 子进程、等待就绪、管理窗口与子进程生命周期
 src/renderer/           本地引导页：仅在子进程启动失败时显示错误
-scripts/bundle-dsh.mjs  自包含打包器：构建 dsh（只读其检出）+ 计算运行时闭包 + 物化到 resources/dsh-<arch>
+scripts/export-dsh.mjs  只读读取 deepseek-harness 构建产物 → 生成源码无关快照 vendor/dsh-runtime/
+scripts/bundle-dsh.mjs  从产物快照物化 dsh 运行时：vendor/dsh-runtime → resources/dsh-<arch>
 scripts/build-standalone.mjs  组装独立 CLI 分发：官方 Node + resources/dsh-<arch> → resources/dsh-standalone
 bundle/                 生成的 deploy workspace（清单 + lockfile，由 bundle 脚本重建）
 electron-builder.yml    桌面应用打包配置
@@ -16,7 +17,7 @@ electron-builder.yml    桌面应用打包配置
 ## 前置条件
 
 - Node 22.19+（或 24+）、pnpm
-- 与 `dsh-electron` 位于同一父目录下的 `deepseek-harness` 检出（可用 `DSH_ROOT` 指向其他位置），无需预先构建
+- `deepseek-harness` 检出（默认同父目录下的 `../deepseek-harness`，可用 `--root` / `DSH_ROOT` 指向其他位置），已手动执行过 `npm run build`
 
 ## 命令一览
 
@@ -26,7 +27,9 @@ electron-builder.yml    桌面应用打包配置
 | `pnpm build` | 编译主进程与渲染进程 | `out/` |
 | `pnpm start` | 预览已编译产物（`electron-vite preview`） | — |
 | `pnpm typecheck` | 主进程 + 渲染进程 TypeScript 类型检查 | — |
-| `pnpm run bundle` | 只读构建 `deepseek-harness`，物化 dsh 运行时 | `resources/dsh-<arch>` |
+| `pnpm run export` | 只读读取 deepseek-harness 构建产物 → 生成源码无关快照 | `vendor/dsh-runtime/` |
+| `pnpm run bundle` | `export` + `deploy`：导出产物快照并物化 dsh 运行时 | `resources/dsh-<arch>` |
+| `pnpm run deploy` | 仅从已有快照物化（跳过导出） | `resources/dsh-<arch>` |
 | `pnpm run standalone` | 组装独立 CLI 分发：官方 Node + `resources/dsh-<arch>`（宿主架构） | `resources/dsh-standalone/`、`release/dsh-standalone-<平台>-<架构>.zip` |
 | `pnpm run standalone --arch <x64\|arm64>` | 按指定架构组装（需机器上有对应架构的 `resources/dsh-<arch>`） | 同上（指定架构） |
 | `pnpm dist:standalone` | `bundle` + `standalone`：纯 CLI 分发 | `release/dsh-standalone-*.zip` |
@@ -34,24 +37,49 @@ electron-builder.yml    桌面应用打包配置
 | `pnpm dist:mac` | macOS：dmg + zip，x64 与 arm64 双架构 | `release/*.dmg`、`*.zip` |
 | `pnpm dist:mac:x64` | 只打 macOS x64 半边 | 同上（仅 x64） |
 | `pnpm dist:mac:arm64` | 只打 macOS arm64 半边（需 `resources/dsh-arm64`） | 同上（仅 arm64） |
-| `pnpm dist:win` | Windows：NSIS 安装包 + zip（建议在 Windows 机器/CI 执行） | `release/*.exe`、`*.zip` |
+| `pnpm dist:win` | Windows：NSIS 安装包 + 免安装 zip（建议在 Windows 机器/CI 执行） | `release/*.exe`、`*-win.zip` |
 | `pnpm dist:linux` | Linux：AppImage + deb | `release/*.AppImage`、`*.deb` |
+
+## 第一步：构建 deepseek-harness（在该仓库里，手动）
+
+`deepseek-harness` 的构建在它自己的仓库完成，本仓库不参与：
+
+```sh
+cd ../deepseek-harness
+npm run build            # 构建 CLI + Web 前端（产出各包 lib/、apps/web/dist/）
+```
+
+## 第二步：导出产物快照（`pnpm run export`）
+
+`scripts/export-dsh.mjs` 只**读取**上面构建出的产物，在 `vendor/dsh-runtime/` 生成一份**不含源码**的快照：
+
+```sh
+cd ../dsh-electron
+pnpm run export          # 默认读取 ../deepseek-harness，可用 --root / DSH_ROOT 指定
+```
+
+拷贝的内容（`vendor/dsh-runtime/`）：
+
+- 全部 workspace 包的 `package.json` + 构建产物（`lib/`、`dist/`、`config/`、`cordis.patch.yml` 等，按各包 `files` 字段挑选）；
+- `pnpm-workspace.yaml` + `pnpm-lock.yaml`（解析依赖闭包用）。
+
+**不含**任何源码（无 `src/`、`tests/`、`scripts/`、`*.ts`、`node_modules`），`deepseek-harness` 的 git 状态保持干净。快照约 51MB，可打成 zip 传输到另一台机器——那边无需 harness 检出，直接 `pnpm run bundle` 从快照物化即可。
 
 ## 生成自包含运行时（`pnpm run bundle`）
 
 ```sh
 pnpm install
-pnpm run bundle
+pnpm run bundle          # = pnpm run export && pnpm run deploy
 ```
 
-`scripts/bundle-dsh.mjs` 完成四件事：
+`pnpm run bundle` 依次完成：
 
-1. 在 `deepseek-harness` 检出中同步依赖（`pnpm install --frozen-lockfile`，只动 gitignored 的 `node_modules`）。
-2. 构建 CLI 与 Web 前端（`npm run build`，同样只写 gitignored 产物）。
-3. 读取 dsh 的 workspace 清单计算 `dsh web` 配置的运行时闭包，在本地 `bundle/` workspace 生成纯依赖清单。
+1. `scripts/export-dsh.mjs`：从 `deepseek-harness` 检出导出产物快照（只读，见上）。
+2. `scripts/bundle-dsh.mjs`：读取 `vendor/dsh-runtime` 的 workspace 清单，计算 `dsh web` 配置的运行时闭包。
+3. 在本地 `bundle/` workspace 生成纯依赖清单（manifest），从 registry 解析第三方依赖。
 4. 用 `pnpm deploy` 把 CLI、依赖闭包和前端物化到 `resources/dsh-<arch>`（arch = 安装机器架构）。
 
-`deepseek-harness` 的 git 状态在整个过程中保持干净；`bundle/` 属于本仓库，可随时删除重建。
+`bundle/` 属于本仓库，可随时删除重建；`vendor/dsh-runtime` 是产物快照，已被 gitignore。
 
 > 说明：物化时跳过原生依赖的构建脚本（`ignore-scripts`），依赖自带预编译产物（node-pty、koffi 等为 N-API，ABI 跨 Node 版本稳定），因此同一份 payload 能在 `dsh-standalone` 携带的官方 Node 下运行。`dsh web` 的 Web 界面与主流程不依赖这些原生模块即可启动。
 

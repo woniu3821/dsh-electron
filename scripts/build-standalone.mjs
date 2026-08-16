@@ -37,9 +37,9 @@
  * Usage:
  *   node scripts/build-standalone.mjs [--arch <x64|arm64>]
  */
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -150,6 +150,210 @@ function slimNodeDist(nodeDir) {
   console.log(`build-standalone: slimmed node dist (removed: ${removed.join(', ')})`)
 }
 
+/**
+ * Files that ship in npm packages but are never needed at runtime. Dropping
+ * them from the deployed dsh runtime cuts ~17k small files and ~120MB
+ * (.d.ts/.map/.md + Windows .pdb debug symbols + shipped test folders), which
+ * dramatically speeds up both installer creation and installation (NSIS
+ * creates every file one by one; small-file count dominates install time).
+ * LICENSE files are kept for legal compliance.
+ */
+const RUNTIME_DROP_PATTERN =
+  /(?:\.d\.(?:m|c)?ts$|\.d\.(?:m|c)?ts\.map$|\.map$|\.tsbuildinfo$|\.md$|\.pdb$|^readme(?:\.|$)|^changelog(?:\.|$))/i
+/** Directories that only ever hold tests, never runtime code. */
+const RUNTIME_DROP_DIRS = new Set(['test', 'tests'])
+
+/** Recursively strip non-runnable files from a deployed runtime tree. */
+function slimRuntime(runtimeDir) {
+  const removed = { files: 0, bytes: 0 }
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (RUNTIME_DROP_DIRS.has(entry.name)) {
+          removed.bytes += dirSize(p)
+          removed.files += countFiles(p)
+          rmSync(p, { recursive: true, force: true })
+          continue
+        }
+        walk(p)
+        try {
+          if (readdirSync(p).length === 0) rmSync(p, { recursive: true, force: true })
+        } catch (error) {
+          if (error?.code !== 'ENOENT') throw error
+        }
+        continue
+      }
+      if (!RUNTIME_DROP_PATTERN.test(entry.name)) continue
+      removed.files += 1
+      try {
+        removed.bytes += statSync(p).size
+        rmSync(p, { force: true })
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+    }
+  }
+  const dirSize = (d) => {
+    let s = 0
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name)
+      if (e.isDirectory()) s += dirSize(p)
+      else s += statSync(p).size
+    }
+    return s
+  }
+  const countFiles = (d) => {
+    let n = 0
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.isDirectory()) n += countFiles(join(d, e.name))
+      else n += 1
+    }
+    return n
+  }
+  walk(runtimeDir)
+  const mb = Math.round(removed.bytes / 1024 / 1024)
+  console.log(`build-standalone: slimmed runtime (-${removed.files} files, -${mb}MB)`)
+}
+
+/**
+ * Extract the pnpm virtual-store directory name (depPath) from a symlink
+ * target such as `..\\..\\commander@15.0.0\\node_modules\\commander` or
+ * `..\\..\\..\\@aws-crypto+sha256-js@5.2.0\\node_modules\\@aws-crypto\\sha256-js`.
+ * @returns the depPath (`commander@15.0.0`), or null when the target is not a
+ *   `.pnpm/<depPath>/node_modules/<name>` link.
+ */
+function depPathFromLinkTarget(target) {
+  const marker = `${sep}node_modules${sep}`
+  const idx = target.lastIndexOf(marker)
+  if (idx === -1) return null
+  const head = target.slice(0, idx)
+  const slash = head.lastIndexOf(sep)
+  return slash === -1 ? null : head.slice(slash + 1)
+}
+
+/**
+ * Index the deployed pnpm virtual store (`.pnpm/<depPath>/node_modules/`).
+ * Each virtual directory holds exactly one package's real files plus its
+ * direct dependencies as sibling symlinks, so one walk yields both the
+ * package location and its dependency graph.
+ * @returns Map<depPath, { realDir, deps: Array<{ alias, depPath }> }>
+ */
+function collectPackages(srcNm) {
+  const pkgInfo = new Map()
+  const pnpmDir = join(srcNm, '.pnpm')
+  if (!existsSync(pnpmDir)) return pkgInfo
+  for (const depPath of readdirSync(pnpmDir)) {
+    const nmDir = join(pnpmDir, depPath, 'node_modules')
+    if (!existsSync(nmDir)) continue
+    const info = { realDir: null, deps: [] }
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name)
+        if (entry.isSymbolicLink()) {
+          const dep = depPathFromLinkTarget(readlinkSync(p))
+          if (dep !== null) {
+            info.deps.push({ alias: relative(nmDir, p).replaceAll('\\', '/'), depPath: dep })
+          }
+        } else if (entry.isDirectory()) {
+          if (existsSync(join(p, 'package.json'))) {
+            if (info.realDir === null) info.realDir = p
+          } else {
+            walk(p)
+          }
+        }
+      }
+    }
+    walk(nmDir)
+    if (info.realDir !== null) pkgInfo.set(depPath, info)
+  }
+  return pkgInfo
+}
+
+/** Copy a package's real files, skipping its (`.bin`-only) nested node_modules. */
+function copyPackageFiles(srcDir, dstDir) {
+  mkdirSync(dstDir, { recursive: true })
+  for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules') continue
+    const s = join(srcDir, entry.name)
+    const d = join(dstDir, entry.name)
+    if (entry.isDirectory()) copyPackageFiles(s, d)
+    else if (entry.isFile()) copyFileSync(s, d)
+    // Any symlink inside a package is a `.bin` shim already skipped above.
+  }
+}
+
+/**
+ * Rewrite a pnpm isolated node_modules (`.pnpm` store + symlinks) into a flat,
+ * link-free layout that survives `cpSync`/electron-builder/NSIS packaging.
+ * Hoists each dependency to the top level; on a version conflict it is nested
+ * under the referring package's own node_modules, mirroring Node's resolution.
+ */
+function flattenNodeModules(srcNm, dstNm) {
+  const pkgInfo = collectPackages(srcNm)
+  mkdirSync(dstNm, { recursive: true })
+
+  const topPlaced = new Map() // alias -> depPath
+  const nestPlaced = new Map() // absolute dst dir -> depPath
+
+  const materialize = (depPath, dstDir) => {
+    const info = pkgInfo.get(depPath)
+    if (info === undefined) return
+    copyPackageFiles(info.realDir, dstDir)
+    for (const dep of info.deps) place(dep.alias, dep.depPath, dstDir)
+  }
+
+  const place = (alias, depPath, ownerDir) => {
+    if (!topPlaced.has(alias)) {
+      topPlaced.set(alias, depPath)
+      materialize(depPath, join(dstNm, alias))
+      return
+    }
+    if (topPlaced.get(alias) === depPath) return
+    // Top level already holds a different version: nest under the referrer.
+    const nestNm = ownerDir === null ? dstNm : join(ownerDir, 'node_modules')
+    const key = join(nestNm, alias)
+    if (!nestPlaced.has(key)) {
+      nestPlaced.set(key, depPath)
+      materialize(depPath, key)
+    }
+  }
+
+  // Top-level direct dependencies are symlinks (possibly inside @scope/ dirs).
+  for (const entry of readdirSync(srcNm, { withFileTypes: true })) {
+    const p = join(srcNm, entry.name)
+    if (entry.isSymbolicLink()) {
+      const dep = depPathFromLinkTarget(readlinkSync(p))
+      if (dep !== null) place(entry.name, dep, null)
+    } else if (entry.isDirectory() && entry.name.startsWith('@')) {
+      for (const scoped of readdirSync(p, { withFileTypes: true })) {
+        if (!scoped.isSymbolicLink()) continue
+        const dep = depPathFromLinkTarget(readlinkSync(join(p, scoped.name)))
+        if (dep !== null) place(`${entry.name}/${scoped.name}`, dep, null)
+      }
+    }
+  }
+}
+
+/**
+ * Copy the deployed dsh payload into the runtime dir, flattening its
+ * node_modules into a link-free tree. Non-node_modules entries (package.json,
+ * pnpm lockfile/workspace files) are copied verbatim.
+ */
+function copyPayloadFlat(payloadDir, runtimeDir) {
+  mkdirSync(runtimeDir, { recursive: true })
+  for (const entry of readdirSync(payloadDir, { withFileTypes: true })) {
+    const s = join(payloadDir, entry.name)
+    if (entry.name === 'node_modules') {
+      flattenNodeModules(s, join(runtimeDir, 'node_modules'))
+    } else if (entry.isDirectory()) {
+      cpSync(s, join(runtimeDir, entry.name), { recursive: true })
+    } else if (entry.isFile()) {
+      copyFileSync(s, join(runtimeDir, entry.name))
+    }
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2)
   let targetArch
@@ -210,7 +414,8 @@ async function main() {
 
     console.log(`build-standalone: assembling ${outDir}`)
     cpSync(extractedRoot, join(outDir, 'node'), { recursive: true })
-    cpSync(payload, join(outDir, 'runtime'), { recursive: true })
+    copyPayloadFlat(payload, join(outDir, 'runtime'))
+    slimRuntime(join(outDir, 'runtime'))
 
     const binPath = join(outDir, 'dsh')
     writeFileSync(binPath, `#!/usr/bin/env sh
