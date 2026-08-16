@@ -7,7 +7,7 @@ DeepSeek Harness 桌面壳。它把 `deepseek-harness` 的 `dsh web` 运行时�
 ```
 src/main/index.ts       主进程：拉起 dsh web 子进程、等待就绪、管理窗口与子进程生命周期
 src/renderer/           本地引导页：仅在子进程启动失败时显示错误
-scripts/bundle-dsh.mjs  自包含打包器：构建 dsh（只读其 checkout）+ 算运行时闭包 + 物化到 resources/dsh
+scripts/bundle-dsh.mjs  自包含打包器：构建 dsh（只读其检出）+ 计算运行时闭包 + 物化到 resources/dsh-<arch>
 scripts/build-standalone.mjs  组装独立 CLI 分发：官方 Node + resources/dsh-<arch> → resources/dsh-standalone
 bundle/                 生成的 deploy workspace（清单 + lockfile，由 bundle 脚本重建）
 electron-builder.yml    桌面应用打包配置
@@ -16,7 +16,7 @@ electron-builder.yml    桌面应用打包配置
 ## 前置条件
 
 - Node 22.19+（或 24+）、pnpm
-- 同一目录层级下存在 `deepseek-harness` 检出（本仓库在 `/Users/tao/study/` 下；可用 `DSH_ROOT` 覆盖该路径），无需预先构建
+- 与 `dsh-electron` 位于同一父目录下的 `deepseek-harness` 检出（可用 `DSH_ROOT` 指向其他位置），无需预先构建
 
 ## 生成自包含运行时（`pnpm run bundle`）
 
@@ -27,7 +27,7 @@ pnpm run bundle
 
 `scripts/bundle-dsh.mjs` 完成四件事：
 
-1. 在 `deepseek-harness` checkout 里同步依赖（`pnpm install --frozen-lockfile`，只动 gitignored 的 `node_modules`）。
+1. 在 `deepseek-harness` 检出中同步依赖（`pnpm install --frozen-lockfile`，只动 gitignored 的 `node_modules`）。
 2. 构建 CLI 与 Web 前端（`npm run build`，同样只写 gitignored 产物）。
 3. 读取 dsh 的 workspace 清单计算 `dsh web` 配置的运行时闭包，在本地 `bundle/` workspace 生成纯依赖清单。
 4. 用 `pnpm deploy` 把 CLI、依赖闭包和前端物化到 `resources/dsh-<arch>`（arch = 安装机器架构）。
@@ -70,7 +70,7 @@ macOS 双架构：payload（`resources/dsh-<arch>`，`pnpm run bundle` 的产物
 
 产物名带 `${arch}`（如 `DeepSeek Harness Desktop-0.1.0-arm64.dmg`）以免两架构互相覆盖。若 `resources/dsh-arm64` 缺失，`standalone:arm64` 会报错并提示先在 arm 机器上 bundle。
 
-> Electron 分发的 zip 由 electron-builder 从 npmmirror 下载（`electron-builder.yml` 的 `electronDownload.mirror`；github.com 官方源在部分网络环境下会超时卡死），缓存于 `~/Library/Caches/electron/`，已缓存的架构直接复用、不触发网络。
+> Electron 分发的 zip 由 electron-builder 从 npmmirror 下载（见 `electron-builder.yml` 的 `electronDownload.mirror`；github.com 官方源在部分受限网络环境下连接不稳定）。归档缓存于 `~/Library/Caches/electron/`，已缓存的架构直接复用，不会再次发起网络请求。
 
 > Windows 目标建议在 Windows 机器或 CI 上执行 `pnpm package:win`；在 macOS 上构建 Windows 目标需要安装 Wine（NSIS 打包和 exe 图标/版本写入依赖它）。
 
@@ -95,8 +95,9 @@ resources/dsh-standalone/
 
 这一份目录同时是 Electron 桌面应用内嵌并拉起的运行时（`extraResources` 复制为 `Resources/dsh-standalone`）——两种分发共享同一份 payload，只是执行方式不同：桌面应用把它作为子进程拉起，独立 CLI 由用户直接在终端运行。payload 的原生依赖（node-pty、koffi）是 N-API，ABI 跨 Node 版本稳定。
 
-90→- payload 是架构绑定的：`pnpm run bundle` 只链接安装机器架构的原生分包，因此 `--arch <arch>` 组装时需要机器上有对应架构的 `resources/dsh-<arch>`（目标架构的 payload 在目标架构的机器上 bundle 后拷过来）。OS 同样与宿主绑定（darwin/win32/linux），跨 OS 构建请在目标 OS 执行。
-- Node 版本默认取镜像上的最新 v24.x（满足 dsh engines `^22.19.0 || >=24.0.0`），回退到 v24.18.1；可用 `DSH_NODE_VERSION=24.x.y` 固定，镜像默认 npmmirror，可用 `NODE_MIRROR` 覆盖。下载的 Node 归档缓存在 `resources/.node-cache/`。
+> 说明：
+> - payload 是架构绑定的：`pnpm run bundle` 只链接安装机器架构的原生分包，因此 `--arch <arch>` 组装时需要机器上有对应架构的 `resources/dsh-<arch>`（目标架构的 payload 在目标架构的机器上 bundle 后拷过来）。OS 同样与宿主绑定（darwin/win32/linux），跨 OS 构建请在目标 OS 执行。
+> - Node 版本默认取镜像上的最新 v24.x（满足 dsh engines `^22.19.0 || >=24.0.0`），回退到 v24.18.1；可用 `DSH_NODE_VERSION=24.x.y` 固定，镜像默认 npmmirror，可用 `NODE_MIRROR` 覆盖。下载的 Node 归档缓存在 `resources/.node-cache/`。
 
 ## 运行行为
 
