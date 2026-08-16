@@ -18,6 +18,25 @@ electron-builder.yml    桌面应用打包配置
 - Node 22.19+（或 24+）、pnpm
 - 与 `dsh-electron` 位于同一父目录下的 `deepseek-harness` 检出（可用 `DSH_ROOT` 指向其他位置），无需预先构建
 
+## 命令一览
+
+| 命令 | 作用 | 产物 |
+|---|---|---|
+| `pnpm dev` | 开发模式：拉起 `dsh web` 子进程并打开 Electron 窗口（需先 `bundle` + `standalone`，见下） | — |
+| `pnpm build` | 编译主进程与渲染进程 | `out/` |
+| `pnpm start` | 预览已编译产物（`electron-vite preview`） | — |
+| `pnpm typecheck` | 主进程 + 渲染进程 TypeScript 类型检查 | — |
+| `pnpm run bundle` | 只读构建 `deepseek-harness`，物化 dsh 运行时 | `resources/dsh-<arch>` |
+| `pnpm run standalone` | 组装独立 CLI 分发：官方 Node + `resources/dsh-<arch>`（宿主架构） | `resources/dsh-standalone/`、`release/dsh-standalone-<平台>-<架构>.zip` |
+| `pnpm run standalone --arch <x64\|arm64>` | 按指定架构组装（需机器上有对应架构的 `resources/dsh-<arch>`） | 同上（指定架构） |
+| `pnpm dist:standalone` | `bundle` + `standalone`：纯 CLI 分发 | `release/dsh-standalone-*.zip` |
+| `pnpm dist:dir` | 快速验证：仅产出未打包的应用目录，不打 dmg/zip | `release/` 下未打包应用 |
+| `pnpm dist:mac` | macOS：dmg + zip，x64 与 arm64 双架构 | `release/*.dmg`、`*.zip` |
+| `pnpm dist:mac:x64` | 只打 macOS x64 半边 | 同上（仅 x64） |
+| `pnpm dist:mac:arm64` | 只打 macOS arm64 半边（需 `resources/dsh-arm64`） | 同上（仅 arm64） |
+| `pnpm dist:win` | Windows：NSIS 安装包 + zip（建议在 Windows 机器/CI 执行） | `release/*.exe`、`*.zip` |
+| `pnpm dist:linux` | Linux：AppImage + deb | `release/*.AppImage`、`*.deb` |
+
 ## 生成自包含运行时（`pnpm run bundle`）
 
 ```sh
@@ -69,9 +88,9 @@ macOS 双架构：payload（`resources/dsh-<arch>`，`pnpm run bundle` 的产物
 
 1. 在 **arm64 Mac** 上：`pnpm run bundle` → 产出 `resources/dsh-arm64`（内含 arm64 原生插件）
 2. 把 `resources/dsh-arm64` 目录（打包成 zip 传输即可）拷到 **x86 Mac** 的同一路径
-3. 在 **x86 Mac** 上执行 `pnpm run dist:mac`：`standalone:x64` 用本机 bundle 的 `dsh-x64`，`standalone:arm64` 用拷来的 `dsh-arm64`（各下载对应架构官方 Node，归档缓存在 `resources/.node-cache/`），随后分别 `electron-builder --mac --x64` 与 `--mac --arm64` 出包
+3. 在 **x86 Mac** 上执行 `pnpm run dist:mac`：`standalone --arch x64` 用本机 bundle 的 `dsh-x64`，`standalone --arch arm64` 用拷来的 `dsh-arm64`（各下载对应架构官方 Node，归档缓存在 `resources/.node-cache/`），随后分别 `electron-builder --mac --x64` 与 `--mac --arm64` 出包
 
-产物名带 `${arch}`（如 `DeepSeek Harness Desktop-0.1.0-arm64.dmg`）以免两架构互相覆盖。若 `resources/dsh-arm64` 缺失，`standalone:arm64` 会报错并提示先在 arm 机器上 bundle。
+产物名带 `${arch}`（如 `DeepSeek Harness Desktop-0.1.0-arm64.dmg`）以免两架构互相覆盖。若 `resources/dsh-arm64` 缺失，`standalone --arch arm64` 会报错并提示先在 arm 机器上 bundle。
 
 > Electron 分发的 zip 由 electron-builder 从 npmmirror 下载（见 `electron-builder.yml` 的 `electronDownload.mirror`；github.com 官方源在部分受限网络环境下连接不稳定）。归档缓存于 `~/Library/Caches/electron/`，已缓存的架构直接复用，不会再次发起网络请求。
 
@@ -83,7 +102,7 @@ macOS 双架构：payload（`resources/dsh-<arch>`，`pnpm run bundle` 的产物
 
 ```sh
 pnpm dist:standalone   # 组装 resources/dsh-standalone/（宿主架构），并产出 release/dsh-standalone-<平台>-<架构>.zip
-pnpm run standalone -- --arch arm64   # 或指定目标架构（x64|arm64），使用 resources/dsh-arm64
+pnpm run standalone --arch arm64   # 或指定目标架构（x64|arm64），使用 resources/dsh-arm64
 ```
 
 产物结构：

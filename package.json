@@ -11,15 +11,13 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "bundle": "node scripts/bundle-dsh.mjs",
     "standalone": "node scripts/build-standalone.mjs",
-    "standalone:x64": "node scripts/build-standalone.mjs --arch x64",
-    "standalone:arm64": "node scripts/build-standalone.mjs --arch arm64",
-    "dist:dir": "pnpm run bundle && pnpm run standalone && pnpm run build && electron-builder --dir",
-    "dist:mac": "pnpm run bundle && pnpm run standalone:x64 && pnpm run build && electron-builder --mac --x64 && pnpm run standalone:arm64 && electron-builder --mac --arm64",
-    "dist:mac:x64": "pnpm run bundle && pnpm run standalone:x64 && pnpm run build && electron-builder --mac --x64",
-    "dist:mac:arm64": "pnpm run bundle && pnpm run standalone:arm64 && pnpm run build && electron-builder --mac --arm64",
-    "dist:win": "pnpm run bundle && pnpm run standalone && pnpm run build && electron-builder --win",
-    "dist:linux": "pnpm run bundle && pnpm run standalone && pnpm run build && electron-builder --linux",
-    "dist:standalone": "pnpm run bundle && pnpm run standalone"
+    "dist:standalone": "pnpm run bundle && pnpm run standalone",
+    "dist:dir": "pnpm run dist:standalone && pnpm run build && electron-builder --dir",
+    "dist:mac": "pnpm run dist:mac:x64 && pnpm run dist:mac:arm64",
+    "dist:mac:x64": "pnpm run bundle && pnpm run standalone --arch x64 && pnpm run build && electron-builder --mac --x64",
+    "dist:mac:arm64": "pnpm run bundle && pnpm run standalone --arch arm64 && pnpm run build && electron-builder --mac --arm64",
+    "dist:win": "pnpm run dist:standalone && pnpm run build && electron-builder --win",
+    "dist:linux": "pnpm run dist:standalone && pnpm run build && electron-builder --linux"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
