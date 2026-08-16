@@ -22,6 +22,13 @@ const SHUTDOWN_GRACE_MS = 5_000
 let dshProcess: ChildProcess | null = null
 let mainWindow: BrowserWindow | null = null
 
+/**
+ * True once the user asked to quit (Cmd+Q / app.quit()). On macOS the window
+ * close button hides the window instead of destroying it (so the running
+ * session survives); only a real quit destroys windows and stops the server.
+ */
+let isQuitting = false
+
 interface DshLaunch {
   /** The executable to spawn. */
   command: string
@@ -190,6 +197,16 @@ function createMainWindow(url: string): void {
   })
   mainWindow = window
   window.once('ready-to-show', () => window.show())
+  // macOS: the red close button hides the window instead of destroying it.
+  // The page (current conversation, running replies, drafts) stays loaded and
+  // the `dsh web` child keeps running, so clicking the dock icon re-shows the
+  // exact same session. A real quit (Cmd+Q) still destroys and stops dsh.
+  window.on('close', (event) => {
+    if (process.platform === 'darwin' && !isQuitting) {
+      event.preventDefault()
+      window.hide()
+    }
+  })
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null
   })
@@ -213,6 +230,12 @@ function showError(message: string): void {
     },
   })
   mainWindow = window
+  window.on('close', (event) => {
+    if (process.platform === 'darwin' && !isQuitting) {
+      event.preventDefault()
+      window.hide()
+    }
+  })
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = null
   })
@@ -238,7 +261,18 @@ async function start(): Promise<void> {
 void app.whenReady().then(() => start())
 
 app.on('activate', () => {
+  // macOS dock click: re-show the hidden window (same server, same session)
+  // instead of spawning a fresh `dsh web`; only boot a new one if none exists.
+  if (mainWindow !== null) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    return
+  }
   if (BrowserWindow.getAllWindows().length === 0) void start()
+})
+
+app.on('before-quit', () => {
+  isQuitting = true
 })
 
 app.on('window-all-closed', () => {
