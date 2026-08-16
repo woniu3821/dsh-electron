@@ -55,9 +55,12 @@ DSH_EXE=/path/to/dsh pnpm dev          # 直接执行外部 dsh 可执行文件
 ## 桌面应用打包
 
 ```sh
-pnpm package:mac       # macOS：dmg + zip，同时产出 x64 与 arm64 两个架构的包
-pnpm package:win       # Windows：nsis 安装包 + zip
-pnpm package:linux     # Linux：AppImage + deb
+pnpm dist:mac          # macOS：dmg + zip，同时产出 x64 与 arm64 两个架构的包
+pnpm dist:mac:x64      # 只打 x64 半边（用本机 bundle 的 dsh-x64）
+pnpm dist:mac:arm64    # 只打 arm64 半边（需 resources/dsh-arm64，先在 arm 机器上 bundle 后拷入）
+pnpm dist:win          # Windows：nsis 安装包 + zip
+pnpm dist:linux        # Linux：AppImage + deb
+pnpm dist:dir          # 快速验证：仅产出未打包的 .app，不生成 dmg/zip
 ```
 
 `electron-builder.yml` 通过 `extraResources` 把 `resources/dsh-standalone` 复制到打包产物的 `Resources/dsh-standalone`；打包后的应用与开发模式一样，拉起该目录里的 `dsh` CLI 启动 `dsh web`，不依赖系统 Node。
@@ -66,20 +69,20 @@ macOS 双架构：payload（`resources/dsh-<arch>`，`pnpm run bundle` 的产物
 
 1. 在 **arm64 Mac** 上：`pnpm run bundle` → 产出 `resources/dsh-arm64`（内含 arm64 原生插件）
 2. 把 `resources/dsh-arm64` 目录（打包成 zip 传输即可）拷到 **x86 Mac** 的同一路径
-3. 在 **x86 Mac** 上执行 `pnpm run package:mac`：`standalone:x64` 用本机 bundle 的 `dsh-x64`，`standalone:arm64` 用拷来的 `dsh-arm64`（各下载对应架构官方 Node，归档缓存在 `resources/.node-cache/`），随后分别 `electron-builder --mac --x64` 与 `--mac --arm64` 出包
+3. 在 **x86 Mac** 上执行 `pnpm run dist:mac`：`standalone:x64` 用本机 bundle 的 `dsh-x64`，`standalone:arm64` 用拷来的 `dsh-arm64`（各下载对应架构官方 Node，归档缓存在 `resources/.node-cache/`），随后分别 `electron-builder --mac --x64` 与 `--mac --arm64` 出包
 
 产物名带 `${arch}`（如 `DeepSeek Harness Desktop-0.1.0-arm64.dmg`）以免两架构互相覆盖。若 `resources/dsh-arm64` 缺失，`standalone:arm64` 会报错并提示先在 arm 机器上 bundle。
 
 > Electron 分发的 zip 由 electron-builder 从 npmmirror 下载（见 `electron-builder.yml` 的 `electronDownload.mirror`；github.com 官方源在部分受限网络环境下连接不稳定）。归档缓存于 `~/Library/Caches/electron/`，已缓存的架构直接复用，不会再次发起网络请求。
 
-> Windows 目标建议在 Windows 机器或 CI 上执行 `pnpm package:win`；在 macOS 上构建 Windows 目标需要安装 Wine（NSIS 打包和 exe 图标/版本写入依赖它）。
+> Windows 目标建议在 Windows 机器或 CI 上执行 `pnpm dist:win`；在 macOS 上构建 Windows 目标需要安装 Wine（NSIS 打包和 exe 图标/版本写入依赖它）。
 
-## 独立 CLI 分发（`pnpm package:standalone`）
+## 独立 CLI 分发（`pnpm dist:standalone`）
 
 不依赖 Electron 的 `dsh` 命令行分发：把官方 Node 运行时和 `resources/dsh-<arch>`（`pnpm run bundle` 的产物）装进同一个目录，`dsh` 开箱即用、不需要系统装 Node。
 
 ```sh
-pnpm package:standalone   # 组装 resources/dsh-standalone/（宿主架构），并产出 release/dsh-standalone-<平台>-<架构>.zip
+pnpm dist:standalone   # 组装 resources/dsh-standalone/（宿主架构），并产出 release/dsh-standalone-<平台>-<架构>.zip
 pnpm run standalone -- --arch arm64   # 或指定目标架构（x64|arm64），使用 resources/dsh-arm64
 ```
 
