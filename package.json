@@ -1,0 +1,31 @@
+{
+  "name": "dsh-electron",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness desktop shell: runs the dsh web app as a child process and loads it in an Electron window.",
+  "main": "out/main/index.js",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "bundle": "node scripts/bundle-dsh.mjs",
+    "standalone": "node scripts/build-standalone.mjs",
+    "standalone:x64": "node scripts/build-standalone.mjs --arch x64",
+    "standalone:arm64": "node scripts/build-standalone.mjs --arch arm64",
+    "package": "pnpm run bundle && pnpm run standalone && pnpm run build && electron-builder --dir",
+    "package:mac": "pnpm run bundle && pnpm run standalone:x64 && pnpm run build && electron-builder --mac --x64 && pnpm run standalone:arm64 && electron-builder --mac --arm64",
+    "package:win": "pnpm run bundle && pnpm run standalone && pnpm run build && electron-builder --win",
+    "package:linux": "pnpm run bundle && pnpm run standalone && pnpm run build && electron-builder --linux",
+    "package:standalone": "pnpm run bundle && pnpm run standalone"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^7.3.6"
+  },
+  "packageManager": "pnpm@11.22.0+sha512.1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621"
+}

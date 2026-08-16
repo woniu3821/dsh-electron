@@ -1,0 +1,42 @@
+appId: com.deepseek.dsh-electron
+productName: DeepSeek Harness Desktop
+# No electronDist: electron-builder must download the per-arch Electron build
+# (cached under ~/Library/Caches/electron), otherwise every architecture gets
+# the host's local Electron distribution. The zip downloads go through
+# electronDownload.mirror (npmmirror) instead of github.com releases — github
+# is unreliably slow on throttled networks and stalls the build.
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - package.json
+extraResources:
+  # The standalone CLI distribution (official Node + deployed dsh runtime)
+  # that the app launches as its `dsh web` child. Built by `pnpm run
+  # standalone` from the bundle; do not copy resources/dsh itself — it is
+  # embedded inside resources/dsh-standalone/runtime.
+  - from: resources/dsh-standalone
+    to: dsh-standalone
+mac:
+  target:
+    - dmg
+    - zip
+  # Per-arch artifact names: package:mac packs x64 and arm64 in two runs.
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  category: public.app-category.developer-tools
+win:
+  target:
+    - nsis
+    - zip
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+npmRebuild: false
+electronLanguages:
+  - en
+  - zh-CN

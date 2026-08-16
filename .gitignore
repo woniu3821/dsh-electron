@@ -1,0 +1,9 @@
+node_modules/
+out/
+release/
+dist-exe-staging/
+*.log
+.DS_Store
+# 构建产物与缓存,均可由 pnpm run bundle / standalone 重新生成:
+resources/
+bundle/
