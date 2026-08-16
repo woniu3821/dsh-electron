@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "bundle": "node scripts/bundle-dsh.mjs",
     "standalone": "node scripts/build-standalone.mjs",
+    "gen:icons": "node scripts/gen-icons.mjs --input build/favicon.svg --out build",
     "dist:standalone": "pnpm run bundle && pnpm run standalone",
     "dist:dir": "pnpm run dist:standalone && pnpm run build && electron-builder --dir",
     "dist:mac": "pnpm run dist:mac:x64 && pnpm run dist:mac:arm64",
