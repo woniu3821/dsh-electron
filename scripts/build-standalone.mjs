@@ -163,6 +163,27 @@ const RUNTIME_DROP_PATTERN =
 /** Directories that only ever hold tests, never runtime code. */
 const RUNTIME_DROP_DIRS = new Set(['test', 'tests'])
 
+/** Total bytes under a directory tree (follows no symlinks). */
+function dirSize(d) {
+  let s = 0
+  for (const e of readdirSync(d, { withFileTypes: true })) {
+    const p = join(d, e.name)
+    if (e.isDirectory()) s += dirSize(p)
+    else s += statSync(p).size
+  }
+  return s
+}
+
+/** Total files under a directory tree (follows no symlinks). */
+function countFiles(d) {
+  let n = 0
+  for (const e of readdirSync(d, { withFileTypes: true })) {
+    if (e.isDirectory()) n += countFiles(join(d, e.name))
+    else n += 1
+  }
+  return n
+}
+
 /** Recursively strip non-runnable files from a deployed runtime tree. */
 function slimRuntime(runtimeDir) {
   const removed = { files: 0, bytes: 0 }
@@ -194,26 +215,52 @@ function slimRuntime(runtimeDir) {
       }
     }
   }
-  const dirSize = (d) => {
-    let s = 0
-    for (const e of readdirSync(d, { withFileTypes: true })) {
-      const p = join(d, e.name)
-      if (e.isDirectory()) s += dirSize(p)
-      else s += statSync(p).size
-    }
-    return s
-  }
-  const countFiles = (d) => {
-    let n = 0
-    for (const e of readdirSync(d, { withFileTypes: true })) {
-      if (e.isDirectory()) n += countFiles(join(d, e.name))
-      else n += 1
-    }
-    return n
-  }
   walk(runtimeDir)
   const mb = Math.round(removed.bytes / 1024 / 1024)
   console.log(`build-standalone: slimmed runtime (-${removed.files} files, -${mb}MB)`)
+}
+
+/**
+ * Directory-name pattern for node-style platform/arch variants as used by
+ * packages that ship every target's binaries inside one package tree
+ * (node-pty keeps prebuilds/{darwin,linux,win32}-{x64,arm64,...} in-place).
+ * pnpm already filters *optional platform packages* (sharp, koffi 3.x,
+ * ripgrep) by os/cpu, but these single-package multi-target trees survive
+ * `pnpm deploy` whole.
+ */
+const NATIVE_VARIANT_DIR =
+  /^(darwin|linux|win32|freebsd|openbsd|sunos|android)-(x64|arm64|ia32|arm|armv7|armv8|loong64|ppc64|s390x|riscv64|x86)$/
+
+/**
+ * Drop every native prebuild variant that is not the target platform/arch.
+ * The deployed runtime is platform-bound (resources/dsh-<arch> feeds the
+ * matching standalone zip and Electron package), so foreign prebuilds are
+ * dead weight that only inflates installer size and install time.
+ */
+export function slimNativeVariants(runtimeDir, platform, arch) {
+  const target = `${platform}-${arch}`
+  const removed = { files: 0, bytes: 0 }
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const p = join(dir, entry.name)
+      if (entry.name === 'prebuilds') {
+        for (const variant of readdirSync(p, { withFileTypes: true })) {
+          if (!variant.isDirectory()) continue
+          const v = join(p, variant.name)
+          if (!NATIVE_VARIANT_DIR.test(variant.name) || variant.name === target) continue
+          removed.bytes += dirSize(v)
+          removed.files += countFiles(v)
+          rmSync(v, { recursive: true, force: true })
+        }
+      } else {
+        walk(p)
+      }
+    }
+  }
+  walk(runtimeDir)
+  const mb = Math.round(removed.bytes / 1024 / 1024)
+  console.log(`build-standalone: pruned foreign native variants for ${target} (-${removed.files} files, -${mb}MB)`)
 }
 
 /**
@@ -416,6 +463,7 @@ async function main() {
     cpSync(extractedRoot, join(outDir, 'node'), { recursive: true })
     copyPayloadFlat(payload, join(outDir, 'runtime'))
     slimRuntime(join(outDir, 'runtime'))
+    slimNativeVariants(join(outDir, 'runtime'), platform, arch)
 
     const binPath = join(outDir, 'dsh')
     writeFileSync(binPath, `#!/usr/bin/env sh
@@ -450,4 +498,7 @@ set "DIR=%~dp0"
   }
 }
 
-main().catch((error) => fail(error.message))
+const invokedPath = process.argv[1]
+if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => fail(error.message))
+}

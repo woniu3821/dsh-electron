@@ -78,6 +78,7 @@ pnpm run bundle          # = pnpm run export && pnpm run deploy
 2. `scripts/bundle-dsh.mjs`：读取 `vendor/dsh-runtime` 的 workspace 清单，计算 `dsh web` 配置的运行时闭包。
 3. 在本地 `bundle/` workspace 生成纯依赖清单（manifest），从 registry 解析第三方依赖。
 4. 用 `pnpm deploy` 把 CLI、依赖闭包和前端物化到 `resources/dsh-<arch>`（arch = 安装机器架构）。
+5. 校验物化结果：deployed 的 `@deepseek-ai/*` 首包集合必须等于 web-profile 闭包——多出（例如经 registry 解析进依赖图、但快照 workspace 未声明的首包）直接报错，防止运行时悄悄膨胀；缺失的（平台过滤的可选包属于正常）给出警告。
 
 `bundle/` 属于本仓库，可随时删除重建；`vendor/dsh-runtime` 是产物快照，已被 gitignore。
 
@@ -147,6 +148,7 @@ resources/dsh-standalone/
 
 > 说明：
 > - payload 是架构绑定的：`pnpm run bundle` 只链接安装机器架构的原生分包，因此 `--arch <arch>` 组装时需要机器上有对应架构的 `resources/dsh-<arch>`（目标架构的 payload 在目标架构的机器上 bundle 后拷过来）。OS 同样与宿主绑定（darwin/win32/linux），跨 OS 构建请在目标 OS 执行。
+> - 组装时除剥离 `.d.ts`/`.map`/`.md`/`.pdb` 与测试目录外，还会按目标平台/架构剪掉单包内置全平台二进制的原生变体（如 node-pty 的 `prebuilds/{darwin,linux,win32}-*` 只保留目标一套），进一步减小安装包体积与安装时间。
 > - Node 版本默认取镜像上的最新 v24.x（满足 dsh engines `^22.19.0 || >=24.0.0`），回退到 v24.18.1；可用 `DSH_NODE_VERSION=24.x.y` 固定，镜像默认 npmmirror，可用 `NODE_MIRROR` 覆盖。下载的 Node 归档缓存在 `resources/.node-cache/`。
 
 ## 运行行为

@@ -205,6 +205,37 @@ function deploy() {
   })
 }
 
+/**
+ * The deploy must materialise exactly the computed web-profile closure as
+ * first-party (@deepseek-ai/*) packages. An unexpected first-party package
+ * (e.g. pulled from the registry through a published dependency edge the
+ * snapshot's workspace graph does not declare) would silently bloat the
+ * runtime; a missing one breaks it. Missing entries that resolve to
+ * platform-filtered optional packages are legitimate, so they warn instead of
+ * failing — extras are always an error.
+ */
+export function verifyDeployedClosure(deployedNm, closure) {
+  const scopeDir = join(deployedNm, '@deepseek-ai')
+  const deployed = new Set()
+  if (existsSync(scopeDir)) {
+    for (const entry of readdirSync(scopeDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      if (existsSync(join(scopeDir, entry.name, 'package.json'))) deployed.add(`@deepseek-ai/${entry.name}`)
+    }
+  }
+  const expected = new Set(closure)
+  const extra = [...deployed].filter((name) => !expected.has(name)).sort()
+  const missing = [...expected].filter((name) => !deployed.has(name)).sort()
+  if (extra.length > 0) {
+    throw new Error(`bundle-dsh: unexpected first-party packages in deployed runtime: ${extra.join(', ')}. ` +
+      `They are not part of the web-profile closure and would bloat the package.`)
+  }
+  if (missing.length > 0) {
+    console.warn(`bundle-dsh: warning: first-party packages absent from deployed runtime (platform-filtered optional deps are expected): ${missing.join(', ')}`)
+  }
+  console.log(`bundle-dsh: deployed closure matches: ${deployed.size} first-party packages, ${missing.length} absent`)
+}
+
 function usage() {
   return [
     'Usage: node scripts/bundle-dsh.mjs',
@@ -321,7 +352,11 @@ function main() {
     deploy()
   }
 
+  verifyDeployedClosure(join(outDir, 'node_modules'), closure)
   console.log(`bundled runtime written to ${outDir}`)
 }
 
-main()
+const invokedPath = process.argv[1]
+if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+  main()
+}

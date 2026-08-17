@@ -1,5 +1,14 @@
 appId: com.deepseek.dsh-electron
 productName: DeepSeek Harness Desktop
+# The app payload is small (out/ + package.json); the dsh runtime rides in
+# extraResources. asar keeps the app files in one archive — explicit here
+# because the main process loads them via Electron's asar-aware fs.
+asar: true
+# The main process spawns dsh with ELECTRON_RUN_AS_NODE=1 (Electron's embedded
+# Node 24), so the RunAsNode fuse must stay enabled; pin it explicitly so a
+# future Electron default flip cannot silently break packaged builds.
+electronFuses:
+  runAsNode: true
 # win-unpacked carries the bundled Node + dsh runtime (~700MB, ~32k files;
 # scripts/build-standalone.mjs slims the runtime to ~17k files). Compressing
 # with LZMA maximum makes NSIS itself very slow; store makes the installer huge
@@ -53,12 +62,25 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  # The bundled runtime is ~17k small files after slimming; solid LZMA
+  # compression is single-threaded and very slow on that payload, while
+  # per-file zip (useZip) builds and installs far faster at a modest size
+  # cost. No update server exists, so blockmaps (differentialPackage) add
+  # nothing — disable them to keep the installer itself lean.
+  differentialPackage: false
+  useZip: true
 linux:
   target:
     - AppImage
     - deb
   category: Development
 npmRebuild: false
+# electron-builder 26.15.3 matches locale file names literally: macOS .lproj
+# dirs use underscores (zh_CN.lproj) while Windows/Linux .pak files use
+# hyphens (zh-CN.pak), and "zh-CN" does not match "zh_CN" (and vice versa).
+# Both spellings are listed so zh-CN actually ships on every platform; the
+# stray entry is simply absent on the other platform's locale set.
 electronLanguages:
   - en
   - zh-CN
+  - zh_CN
