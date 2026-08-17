@@ -12,15 +12,14 @@
     "bundle": "node scripts/export-dsh.mjs && node scripts/bundle-dsh.mjs",
     "export": "node scripts/export-dsh.mjs",
     "deploy": "node scripts/bundle-dsh.mjs",
-    "standalone": "node scripts/build-standalone.mjs",
+    "prepare:runtime": "node scripts/prepare-runtime.mjs",
     "gen:icons": "node scripts/gen-icons.mjs --input build/favicon.svg --out build",
-    "dist:standalone": "pnpm run bundle && pnpm run standalone",
-    "dist:dir": "pnpm run dist:standalone && pnpm run build && electron-builder --dir",
+    "dist:dir": "pnpm run bundle && pnpm run prepare:runtime && pnpm run build && electron-builder --dir",
     "dist:mac": "pnpm run dist:mac:x64 && pnpm run dist:mac:arm64",
-    "dist:mac:x64": "pnpm run bundle && pnpm run standalone --arch x64 && pnpm run build && electron-builder --mac --x64",
-    "dist:mac:arm64": "pnpm run bundle && pnpm run standalone --arch arm64 && pnpm run build && electron-builder --mac --arm64",
-    "dist:win": "pnpm run dist:standalone && pnpm run build && electron-builder --win",
-    "dist:linux": "pnpm run dist:standalone && pnpm run build && electron-builder --linux"
+    "dist:mac:x64": "pnpm run bundle && pnpm run prepare:runtime -- --arch x64 && pnpm run build && electron-builder --mac --x64",
+    "dist:mac:arm64": "pnpm run bundle && pnpm run prepare:runtime -- --arch arm64 && pnpm run build && electron-builder --mac --arm64",
+    "dist:win": "pnpm run bundle && pnpm run prepare:runtime && pnpm run build && electron-builder --win",
+    "dist:linux": "pnpm run bundle && pnpm run prepare:runtime && pnpm run build && electron-builder --linux"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",

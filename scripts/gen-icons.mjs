@@ -59,8 +59,9 @@ function parseArgs(argv) {
 
 /**
  * Resolve the `sharp` module. Prefers a real dependency of the caller's
- * environment, then falls back to the sharp shipped inside the dsh standalone
- * runtime bundled with this repo.
+ * environment, then falls back to the sharp shipped inside the bundled dsh
+ * runtime (resources/dsh-standalone/runtime, prepared by `pnpm run bundle
+ * && pnpm run prepare:runtime`).
  */
 function resolveSharp() {
   try {
@@ -69,17 +70,22 @@ function resolveSharp() {
   } catch {
     /* fall through to bundled copy */
   }
-  const runtimeRoot = join(ROOT, 'resources', 'dsh-standalone', 'runtime', 'node_modules', '.pnpm')
-  if (existsSync(runtimeRoot)) {
+  const runtimeNm = join(ROOT, 'resources', 'dsh-standalone', 'runtime', 'node_modules')
+  const flat = join(runtimeNm, 'sharp')
+  if (existsSync(flat)) return require(flat)
+  // Fall back to the legacy pnpm virtual-store layout
+  // (`.pnpm/sharp@*/node_modules/sharp`) if a stale runtime is present.
+  const pnpmDir = join(runtimeNm, '.pnpm')
+  if (existsSync(pnpmDir)) {
     const fs = require('node:fs')
-    const dirs = fs.readdirSync(runtimeRoot).filter((d) => d.startsWith('sharp@'))
+    const dirs = fs.readdirSync(pnpmDir).filter((d) => d.startsWith('sharp@'))
     if (dirs.length > 0) {
-      const p = join(runtimeRoot, dirs[0], 'node_modules', 'sharp')
+      const p = join(pnpmDir, dirs[0], 'node_modules', 'sharp')
       if (existsSync(p)) return require(p)
     }
   }
   throw new Error(
-    'sharp is not available. Install it (pnpm add -D sharp) or provide a dsh-standalone runtime.',
+    'sharp is not available. Install it (pnpm add -D sharp) or run `pnpm run bundle && pnpm run prepare:runtime` to provide the bundled runtime.',
   )
 }
 

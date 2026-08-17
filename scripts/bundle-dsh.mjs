@@ -12,13 +12,19 @@
  * through dependencies + peers) and uses pnpm deploy on a generated manifest
  * in the local bundle/ workspace to materialise that closure into
  * resources/dsh-<arch> (arch = the installing machine's), pulling third-party
- * deps from the registry. It never builds and never touches the harness
- * checkout.
+ * deps from the registry.
+ *
+ * After deploy the payload is prepared in place for packaging: node_modules is
+ * flattened from pnpm's virtual-store layout into a link-free tree and
+ * non-runnable files + foreign native prebuild variants are pruned, so
+ * resources/dsh-<arch> is directly copyable into the Electron app
+ * (electron-builder dereferences symlinks and would otherwise duplicate the
+ * store). It never builds and never touches the harness checkout.
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -193,10 +199,12 @@ function rmrf(path) {
 }
 
 function deploy() {
-  // No --legacy: legacy deploy preserves pnpm's symlink/junction layout,
-  // which electron-builder then dereferences into duplicate entries (6x
-  // bloat) and, worse, leaves junctions pointing at absolute build-machine
-  // paths. Non-legacy deploy materialises a flat, link-free node_modules.
+  // No --legacy: legacy deploy keeps pnpm's symlink/junction layout (top-level
+  // links into the global store), which electron-builder dereferences into
+  // duplicate entries (6x bloat) and, worse, leaves junctions pointing at
+  // absolute build-machine paths. Non-legacy deploy materialises real files
+  // into a local .pnpm store, but top-level node_modules is still symlinks
+  // into it — preparePayload() flattens that layout after deploy.
   // inject-workspace-packages is passed via deployEnv() (env var), so no
   // deepseek-harness file is modified.
   return run(pnpmBin, ['--filter', 'dsh-web-manifest', 'deploy', '--prod', outDir], {
@@ -236,13 +244,268 @@ export function verifyDeployedClosure(deployedNm, closure) {
   console.log(`bundle-dsh: deployed closure matches: ${deployed.size} first-party packages, ${missing.length} absent`)
 }
 
+/**
+ * Files that ship in npm packages but are never needed at runtime. Dropping
+ * them from the deployed dsh runtime cuts ~17k small files and ~120MB
+ * (.d.ts/.map/.md + Windows .pdb debug symbols + shipped test folders), which
+ * dramatically speeds up both installer creation and installation (NSIS
+ * creates every file one by one; small-file count dominates install time).
+ * LICENSE files are kept for legal compliance.
+ */
+const RUNTIME_DROP_PATTERN =
+  /(?:\.d\.(?:m|c)?ts$|\.d\.(?:m|c)?ts\.map$|\.map$|\.tsbuildinfo$|\.md$|\.pdb$|^readme(?:\.|$)|^changelog(?:\.|$))/i
+/** Directories that only ever hold tests, never runtime code. */
+const RUNTIME_DROP_DIRS = new Set(['test', 'tests'])
+
+/** Total bytes under a directory tree (follows no symlinks). */
+function dirSize(d) {
+  let s = 0
+  for (const e of readdirSync(d, { withFileTypes: true })) {
+    const p = join(d, e.name)
+    if (e.isDirectory()) s += dirSize(p)
+    else s += statSync(p).size
+  }
+  return s
+}
+
+/** Total files under a directory tree (follows no symlinks). */
+function countFiles(d) {
+  let n = 0
+  for (const e of readdirSync(d, { withFileTypes: true })) {
+    if (e.isDirectory()) n += countFiles(join(d, e.name))
+    else n += 1
+  }
+  return n
+}
+
+/** Recursively strip non-runnable files from a deployed runtime tree. */
+function slimRuntime(runtimeDir) {
+  const removed = { files: 0, bytes: 0 }
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (RUNTIME_DROP_DIRS.has(entry.name)) {
+          removed.bytes += dirSize(p)
+          removed.files += countFiles(p)
+          rmSync(p, { recursive: true, force: true })
+          continue
+        }
+        walk(p)
+        try {
+          if (readdirSync(p).length === 0) rmSync(p, { recursive: true, force: true })
+        } catch (error) {
+          if (error?.code !== 'ENOENT') throw error
+        }
+        continue
+      }
+      if (!RUNTIME_DROP_PATTERN.test(entry.name)) continue
+      removed.files += 1
+      try {
+        removed.bytes += statSync(p).size
+        rmSync(p, { force: true })
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+    }
+  }
+  walk(runtimeDir)
+  const mb = Math.round(removed.bytes / 1024 / 1024)
+  console.log(`bundle-dsh: slimmed runtime (-${removed.files} files, -${mb}MB)`)
+}
+
+/**
+ * Directory-name pattern for node-style platform/arch variants as used by
+ * packages that ship every target's binaries inside one package tree
+ * (node-pty keeps prebuilds/{darwin,linux,win32}-{x64,arm64,...} in-place).
+ * pnpm already filters *optional platform packages* (sharp, koffi 3.x,
+ * ripgrep) by os/cpu, but these single-package multi-target trees survive
+ * `pnpm deploy` whole.
+ */
+const NATIVE_VARIANT_DIR =
+  /^(darwin|linux|win32|freebsd|openbsd|sunos|android)-(x64|arm64|ia32|arm|armv7|armv8|loong64|ppc64|s390x|riscv64|x86)$/
+
+/**
+ * Drop every native prebuild variant that is not the target platform/arch.
+ * The deployed runtime is platform-bound (resources/dsh-<arch> feeds the
+ * matching Electron package), so foreign prebuilds are dead weight that only
+ * inflates installer size and install time.
+ */
+export function slimNativeVariants(runtimeDir, platform, arch) {
+  const target = `${platform}-${arch}`
+  const removed = { files: 0, bytes: 0 }
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const p = join(dir, entry.name)
+      if (entry.name === 'prebuilds') {
+        for (const variant of readdirSync(p, { withFileTypes: true })) {
+          if (!variant.isDirectory()) continue
+          const v = join(p, variant.name)
+          if (!NATIVE_VARIANT_DIR.test(variant.name) || variant.name === target) continue
+          removed.bytes += dirSize(v)
+          removed.files += countFiles(v)
+          rmSync(v, { recursive: true, force: true })
+        }
+      } else {
+        walk(p)
+      }
+    }
+  }
+  walk(runtimeDir)
+  const mb = Math.round(removed.bytes / 1024 / 1024)
+  console.log(`bundle-dsh: pruned foreign native variants for ${target} (-${removed.files} files, -${mb}MB)`)
+}
+
+/**
+ * Extract the pnpm virtual-store directory name (depPath) from a symlink
+ * target such as `..\\..\\commander@15.0.0\\node_modules\\commander` or
+ * `..\\..\\..\\@aws-crypto+sha256-js@5.2.0\\node_modules\\@aws-crypto\\sha256-js`.
+ * @returns the depPath (`commander@15.0.0`), or null when the target is not a
+ *   `.pnpm/<depPath>/node_modules/<name>` link.
+ */
+function depPathFromLinkTarget(target) {
+  const marker = `${sep}node_modules${sep}`
+  const idx = target.lastIndexOf(marker)
+  if (idx === -1) return null
+  const head = target.slice(0, idx)
+  const slash = head.lastIndexOf(sep)
+  return slash === -1 ? null : head.slice(slash + 1)
+}
+
+/**
+ * Index the deployed pnpm virtual store (`.pnpm/<depPath>/node_modules/`).
+ * Each virtual directory holds exactly one package's real files plus its
+ * direct dependencies as sibling symlinks, so one walk yields both the
+ * package location and its dependency graph.
+ * @returns Map<depPath, { realDir, deps: Array<{ alias, depPath }> }>
+ */
+function collectPackages(srcNm) {
+  const pkgInfo = new Map()
+  const pnpmDir = join(srcNm, '.pnpm')
+  if (!existsSync(pnpmDir)) return pkgInfo
+  for (const depPath of readdirSync(pnpmDir)) {
+    const nmDir = join(pnpmDir, depPath, 'node_modules')
+    if (!existsSync(nmDir)) continue
+    const info = { realDir: null, deps: [] }
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name)
+        if (entry.isSymbolicLink()) {
+          const dep = depPathFromLinkTarget(readlinkSync(p))
+          if (dep !== null) {
+            info.deps.push({ alias: relative(nmDir, p).replaceAll('\\', '/'), depPath: dep })
+          }
+        } else if (entry.isDirectory()) {
+          if (existsSync(join(p, 'package.json'))) {
+            if (info.realDir === null) info.realDir = p
+          } else {
+            walk(p)
+          }
+        }
+      }
+    }
+    walk(nmDir)
+    if (info.realDir !== null) pkgInfo.set(depPath, info)
+  }
+  return pkgInfo
+}
+
+/** Copy a package's real files, skipping its (`.bin`-only) nested node_modules. */
+function copyPackageFiles(srcDir, dstDir) {
+  mkdirSync(dstDir, { recursive: true })
+  for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules') continue
+    const s = join(srcDir, entry.name)
+    const d = join(dstDir, entry.name)
+    if (entry.isDirectory()) copyPackageFiles(s, d)
+    else if (entry.isFile()) copyFileSync(s, d)
+    // Any symlink inside a package is a `.bin` shim already skipped above.
+  }
+}
+
+/**
+ * Rewrite a pnpm isolated node_modules (`.pnpm` store + symlinks) into a flat,
+ * link-free layout that survives cpSync/electron-builder/NSIS packaging.
+ * Hoists each dependency to the top level; on a version conflict it is nested
+ * under the referring package's own node_modules, mirroring Node's resolution.
+ */
+export function flattenNodeModules(srcNm, dstNm) {
+  const pkgInfo = collectPackages(srcNm)
+  mkdirSync(dstNm, { recursive: true })
+
+  const topPlaced = new Map() // alias -> depPath
+  const nestPlaced = new Map() // absolute dst dir -> depPath
+
+  const materialize = (depPath, dstDir) => {
+    const info = pkgInfo.get(depPath)
+    if (info === undefined) return
+    copyPackageFiles(info.realDir, dstDir)
+    for (const dep of info.deps) place(dep.alias, dep.depPath, dstDir)
+  }
+
+  const place = (alias, depPath, ownerDir) => {
+    if (!topPlaced.has(alias)) {
+      topPlaced.set(alias, depPath)
+      materialize(depPath, join(dstNm, alias))
+      return
+    }
+    if (topPlaced.get(alias) === depPath) return
+    // Top level already holds a different version: nest under the referrer.
+    const nestNm = ownerDir === null ? dstNm : join(ownerDir, 'node_modules')
+    const key = join(nestNm, alias)
+    if (!nestPlaced.has(key)) {
+      nestPlaced.set(key, depPath)
+      materialize(depPath, key)
+    }
+  }
+
+  // Top-level direct dependencies are symlinks (possibly inside @scope/ dirs).
+  for (const entry of readdirSync(srcNm, { withFileTypes: true })) {
+    const p = join(srcNm, entry.name)
+    if (entry.isSymbolicLink()) {
+      const dep = depPathFromLinkTarget(readlinkSync(p))
+      if (dep !== null) place(entry.name, dep, null)
+    } else if (entry.isDirectory() && entry.name.startsWith('@')) {
+      for (const scoped of readdirSync(p, { withFileTypes: true })) {
+        if (!scoped.isSymbolicLink()) continue
+        const dep = depPathFromLinkTarget(readlinkSync(join(p, scoped.name)))
+        if (dep !== null) place(`${entry.name}/${scoped.name}`, dep, null)
+      }
+    }
+  }
+}
+
+/**
+ * Prepare a deployed payload in place so it is directly packagable: flatten
+ * its node_modules from pnpm's virtual-store layout (.pnpm store + top-level
+ * symlinks) into a link-free tree, then strip non-runnable files (types/docs/
+ * tests) and foreign native prebuild variants. Runs at the end of bundle;
+ * scripts/prepare-runtime.mjs then copies the result into the extraResources
+ * wrapper dir.
+ */
+export function preparePayload(payloadDir, platform, arch) {
+  const nm = join(payloadDir, 'node_modules')
+  const tmp = join(payloadDir, '.node_modules.pnpm')
+  if (existsSync(join(nm, '.pnpm'))) {
+    renameSync(nm, tmp)
+    flattenNodeModules(tmp, nm)
+    rmrf(tmp)
+  } else {
+    console.log('bundle-dsh: node_modules already link-free, skipping flatten')
+  }
+  slimRuntime(payloadDir)
+  slimNativeVariants(payloadDir, platform, arch)
+}
+
 function usage() {
   return [
     'Usage: node scripts/bundle-dsh.mjs',
     '',
     '  Materialises the dsh web runtime (resources/dsh-<arch>) from the',
     '  source-free snapshot at vendor/dsh-runtime (built by scripts/export-dsh.mjs,',
-    '  run via `pnpm run export`; `pnpm run bundle` runs both).',
+    '  run via `pnpm run export`; `pnpm run bundle` runs both), then prepares it',
+    '  in place for packaging (flattened node_modules + slimmed).',
     '  --help   print this help.',
   ].join('\n')
 }
@@ -258,8 +521,8 @@ function main() {
   // vendor/dsh-runtime is the source-free artifact snapshot exported by
   // scripts/export-dsh.mjs (`pnpm run export`) from a deepseek-harness
   // checkout built by hand. Everything downstream — closure resolution, deploy
-  // materialisation, standalone assembly, electron packaging — happens in this
-  // repo; no build, no source, no harness checkout needed.
+  // materialisation, runtime preparation (flatten + slim), electron packaging —
+  // happens in this repo; no build, no source, no harness checkout needed.
   if (!existsSync(join(dshRoot, 'pnpm-workspace.yaml'))) {
     throw new Error(
       `dsh runtime snapshot not found at ${dshRoot}. Run \`npm run build\` in the ` +
@@ -353,7 +616,8 @@ function main() {
   }
 
   verifyDeployedClosure(join(outDir, 'node_modules'), closure)
-  console.log(`bundled runtime written to ${outDir}`)
+  preparePayload(outDir, process.platform, process.arch)
+  console.log(`bundled runtime prepared (flattened + slimmed) at ${outDir}`)
 }
 
 const invokedPath = process.argv[1]

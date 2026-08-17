@@ -2,10 +2,11 @@
  * Desktop shell for the DeepSeek Harness web app.
  *
  * The Harness ships as a separate project. This shell launches its packaged
- * `dsh web` child process (the standalone CLI distribution, official Node
- * included), waits for its readiness line, then loads the served URL in a
- * BrowserWindow. The child process owns all agent work; this process only
- * owns the window and the child's lifecycle.
+ * `dsh web` child process — the bundled runtime under
+ * resources/dsh-standalone/runtime, run with Electron's own embedded Node via
+ * ELECTRON_RUN_AS_NODE — waits for its readiness line, then loads the served
+ * URL in a BrowserWindow. The child process owns all agent work; this process
+ * only owns the window and the child's lifecycle.
  */
 
 import { app, BrowserWindow, shell } from 'electron'
@@ -73,7 +74,7 @@ function resolveDshLaunch(): DshLaunch {
   const binPath = binOverride !== undefined && binOverride !== '' ? binOverride : bundledBinPath()
   if (!existsSync(binPath)) {
     throw new Error(
-      `bundled dsh bin.js is missing at ${binPath}. Run \`pnpm run bundle && pnpm run standalone\` before building or launching.`,
+      `bundled dsh bin.js is missing at ${binPath}. Run \`pnpm run bundle && pnpm run prepare:runtime\` before building or launching.`,
     )
   }
   return {
@@ -163,7 +164,7 @@ function stopDsh(): void {
   if (child === null) return
   dshProcess = null
   if (process.platform === 'win32') {
-    // The child runs under a cmd.exe wrapper (dsh.cmd); kill the whole tree.
+    // Windows has no process groups; kill the child's whole tree.
     spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
     return
   }
