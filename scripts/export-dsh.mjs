@@ -126,6 +126,33 @@ function linkedOverrideDirs() {
 }
 
 /**
+ * Expand a `files` glob whose static prefix is a partial filename rather than
+ * a directory. The prefix shortcut ("lib/types-*.js" -> "lib/types-") never
+ * exists as a path, so without this the match (Rollup-style hash chunks such
+ * as lib/types-CNjZgO4h.js, which lib/index.js imports at runtime) would be
+ * silently dropped from the snapshot. Patterns with a double-star glob
+ * segment (star, star, slash) expand to the whole base directory, matching
+ * the prefix-dir behaviour for "lib/*.js".
+ * @returns matching paths under srcDir
+ */
+function expandGlob(srcDir, entry) {
+  const star = entry.indexOf('*')
+  const slash = entry.lastIndexOf('/', star)
+  const baseDir = slash === -1 ? '.' : entry.slice(0, slash)
+  const pattern = slash === -1 ? entry : entry.slice(slash + 1)
+  const dirPath = join(srcDir, baseDir)
+  if (!existsSync(dirPath)) return []
+  if (pattern.includes('/')) return [dirPath]
+  const regex = new RegExp(`^${pattern
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[^/]*')}$`)
+  return readdirSync(dirPath)
+    .filter((name) => regex.test(name))
+    .map((name) => join(dirPath, name))
+}
+
+/**
  * Copy one package's runnable artifacts (never source). Driven by the
  * package's `files` field — the npm publish boundary — so it matches exactly
  * what pnpm deploy will materialise. Falls back to lib/dist/config when a
@@ -152,9 +179,22 @@ function copyArtifacts(srcDir, destDir) {
       if (prefix === '' || prefix === '.') continue
       if (SOURCE_DIRS.has(prefix.split('/')[0])) continue
       const p = join(srcDir, prefix)
-      if (!existsSync(p)) continue
-      if (statSync(p).isDirectory()) cpSync(p, join(destDir, prefix), { recursive: true })
-      else cpSync(p, join(destDir, prefix))
+      if (existsSync(p)) {
+        if (statSync(p).isDirectory()) cpSync(p, join(destDir, prefix), { recursive: true })
+        else cpSync(p, join(destDir, prefix))
+        continue
+      }
+      // The prefix may be a partial filename (e.g. "lib/types-*.js" ->
+      // "lib/types-"), which never exists as a path; expand the glob in the
+      // containing directory instead of dropping the entry. Non-glob entries
+      // with a missing path keep the original silent-skip behaviour (e.g. a
+      // platform-specific prebuilds dir absent from this machine).
+      if (!entry.includes('*')) continue
+      for (const match of expandGlob(srcDir, entry)) {
+        const dest = join(destDir, relative(srcDir, match))
+        if (statSync(match).isDirectory()) cpSync(match, dest, { recursive: true })
+        else cpSync(match, dest)
+      }
     }
   }
 
