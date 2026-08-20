@@ -55,6 +55,11 @@ mac:
   # Per-arch artifact names: package:mac packs x64 and arm64 in two runs.
   artifactName: ${productName}-${version}-${arch}.${ext}
   category: public.app-category.developer-tools
+  # No usable codesigning identity on the build machine: the keychain's
+  # certificates have no private key codesign can reach (identity signing
+  # fails with errSecInternalComponent). Explicitly skip signing, like
+  # win.signExecutable: false, so the mac pipeline doesn't fail in codesign.
+  identity: null
 win:
   target:
     - nsis

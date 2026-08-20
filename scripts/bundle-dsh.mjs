@@ -179,7 +179,12 @@ function cleanWorkbuddyShim(env) {
  */
 function deployEnv(env) {
   const e = cleanWorkbuddyShim(env)
-  e.pnpm_config_inject_workspace_packages = 'true'
+  // pnpm reads env config under the `npm_config_` prefix (inherited from npm);
+  // `pnpm_config_` is not read by pnpm v10's config loader. The workspace yaml
+  // setting alone is not enough either: v10.34.5's deploy checks the resolved
+  // config, not the workspace manifest, so deploy() also passes the flag on
+  // the command line (works on v10 and v11).
+  e.npm_config_inject_workspace_packages = 'true'
   return e
 }
 
@@ -205,9 +210,9 @@ function deploy() {
   // absolute build-machine paths. Non-legacy deploy materialises real files
   // into a local .pnpm store, but top-level node_modules is still symlinks
   // into it — preparePayload() flattens that layout after deploy.
-  // inject-workspace-packages is passed via deployEnv() (env var), so no
-  // deepseek-harness file is modified.
-  return run(pnpmBin, ['--filter', 'dsh-web-manifest', 'deploy', '--prod', outDir], {
+  // inject-workspace-packages is passed via deployEnv() (env var) and as a CLI
+  // flag, so no deepseek-harness file is modified.
+  return run(pnpmBin, ['--config.inject-workspace-packages=true', '--filter', 'dsh-web-manifest', 'deploy', '--prod', outDir], {
     cwd: bundleRoot,
     env: deployEnv(process.env),
   })
@@ -756,8 +761,8 @@ function main() {
   }
 
   // Non-legacy `pnpm deploy` requires inject-workspace-packages=true, but we
-  // set it via environment variable in deployEnv() instead of touching the
-  // snapshot's pnpm-workspace.yaml.
+  // set it via deployEnv() (env var) and the deploy CLI flag instead of
+  // touching the snapshot's pnpm-workspace.yaml.
 
   const { byName, closure } = computeClosure()
   const missingSeeds = SEEDS.filter((name) => !byName.has(name))
