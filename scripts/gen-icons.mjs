@@ -60,7 +60,7 @@ function parseArgs(argv) {
 /**
  * Resolve the `sharp` module. Prefers a real dependency of the caller's
  * environment, then falls back to the sharp shipped inside the bundled dsh
- * runtime (resources/dsh-standalone/runtime, prepared by `pnpm run bundle
+ * runtime (resources/dsh/runtime, prepared by `pnpm run bundle
  * && pnpm run prepare:runtime`).
  */
 function resolveSharp() {
@@ -70,7 +70,7 @@ function resolveSharp() {
   } catch {
     /* fall through to bundled copy */
   }
-  const runtimeNm = join(ROOT, 'resources', 'dsh-standalone', 'runtime', 'node_modules')
+  const runtimeNm = join(ROOT, 'resources', 'dsh', 'runtime', 'node_modules')
   const flat = join(runtimeNm, 'sharp')
   if (existsSync(flat)) return require(flat)
   // Fall back to the legacy pnpm virtual-store layout

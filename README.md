@@ -9,7 +9,7 @@ src/main/index.ts       主进程：拉起 dsh web 子进程、等待就绪、�
 src/renderer/           本地引导页：仅在子进程启动失败时显示错误
 scripts/export-dsh.mjs  只读读取 deepseek-harness 构建产物 → 生成源码无关快照 vendor/dsh-runtime/
 scripts/bundle-dsh.mjs  从产物快照物化 dsh 运行时并原地产出扁平裁剪版：vendor/dsh-runtime → resources/dsh-<arch>
-scripts/prepare-runtime.mjs  填充 extraResources 包装目录：resources/dsh-<arch> → resources/dsh-standalone/runtime
+scripts/prepare-runtime.mjs  填充 extraResources 包装目录：resources/dsh-<arch> → resources/dsh/runtime
 bundle/                 生成的 deploy workspace（清单 + lockfile，由 bundle 脚本重建）
 electron-builder.yml    桌面应用打包配置
 ```
@@ -30,7 +30,7 @@ electron-builder.yml    桌面应用打包配置
 | `pnpm run export` | 只读读取 deepseek-harness 构建产物 → 生成源码无关快照 | `vendor/dsh-runtime/` |
 | `pnpm run bundle` | `export` + `deploy`：导出产物快照，物化并原位扁平裁剪 dsh 运行时 | `resources/dsh-<arch>` |
 | `pnpm run deploy` | 仅从已有快照物化 + 原位扁平裁剪（跳过导出） | `resources/dsh-<arch>` |
-| `pnpm run prepare:runtime` | 把 `resources/dsh-<arch>`（宿主架构）复制进 extraResources 包装目录 | `resources/dsh-standalone/runtime/` |
+| `pnpm run prepare:runtime` | 把 `resources/dsh-<arch>`（宿主架构）复制进 extraResources 包装目录 | `resources/dsh/runtime/` |
 | `pnpm run prepare:runtime -- --arch <x64\|arm64>` | 按指定架构填充（需机器上有对应架构的 `resources/dsh-<arch>`） | 同上（指定架构） |
 | `pnpm dist:dir` | 快速验证：`bundle` + `prepare:runtime` 后仅产出未打包的应用目录，不打 dmg/zip | `release/` 下未打包应用 |
 | `pnpm dist:mac` | macOS：dmg + zip，x64 与 arm64 双架构 | `release/*.dmg`、`*.zip` |
@@ -78,7 +78,7 @@ pnpm run bundle          # = pnpm run export && pnpm run deploy
 3. 在本地 `bundle/` workspace 生成纯依赖清单（manifest），从 registry 解析第三方依赖。
 4. 用 `pnpm deploy` 把 CLI、依赖闭包和前端物化到 `resources/dsh-<arch>`（arch = 安装机器架构）。
 5. 校验物化结果：deployed 的 `@deepseek-ai/*` 首包集合必须等于 web-profile 闭包——多出（例如经 registry 解析进依赖图、但快照 workspace 未声明的首包）直接报错，防止运行时悄悄膨胀；缺失的（平台过滤的可选包属于正常）给出警告。
-6. 就地准备打包：把 `node_modules` 从 pnpm 虚拟存储布局（`.pnpm` 存储 + 顶层符号链接）拍平为无链接树（否则 electron-builder 会解引用符号链接、把同一份包重复打进安装包），并按目标平台/架构剥离 `.d.ts`/`.map`/`.md`/`.pdb`、测试目录与多余的原生预编译变体（如 node-pty `prebuilds/{darwin,linux,win32}-*` 只保留目标一套，约 17k 个小文件）。`resources/dsh-<arch>` 至此就是可直接打包的运行时。
+6. 就地准备打包：把 `node_modules` 从 pnpm 虚拟存储布局（`.pnpm` 存储 + 顶层符号链接）拍平为无链接树（否则 electron-builder 会解引用符号链接、把同一份包重复打进安装包），把嵌套包提升到尽量浅的层级（基于 semver 范围校验，压短深层冲突链——Windows 安装目录 + 打包路径必须低于 260 字符的 MAX_PATH，否则 NSIS 安装与资源管理器解压都会报"路径太长"），并按目标平台/架构剥离 `.d.ts`/`.map`/`.md`/`.pdb`、测试目录与多余的原生预编译变体（如 node-pty `prebuilds/{darwin,linux,win32}-*` 只保留目标一套，约 17k 个小文件）。`resources/dsh-<arch>` 至此就是可直接打包的运行时。
 
 `bundle/` 属于本仓库，可随时删除重建；`vendor/dsh-runtime` 是产物快照，已被 gitignore。
 
@@ -91,7 +91,7 @@ pnpm run bundle && pnpm run prepare:runtime
 pnpm dev
 ```
 
-主进程默认拉起 `resources/dsh-standalone/runtime` 里的 deployed 运行时（`pnpm run prepare:runtime` 的产物，与打包后的应用同一份），用 Electron 内置 Node 24 以 `web --host 127.0.0.1 --port <port>` 启动其 `node_modules/@deepseek-ai/dsh/lib/bin.js`，并带 `--expose-internals` 标志——`dsh` 的插件加载器只有在存在该标志时才回退到 Node 内部 ESM 加载器，因此该标志是必需的。
+主进程默认拉起 `resources/dsh/runtime` 里的 deployed 运行时（`pnpm run prepare:runtime` 的产物，与打包后的应用同一份），用 Electron 内置 Node 24 以 `web --host 127.0.0.1 --port <port>` 启动其 `node_modules/@deepseek-ai/dsh/lib/bin.js`，并带 `--expose-internals` 标志——`dsh` 的插件加载器只有在存在该标志时才回退到 Node 内部 ESM 加载器，因此该标志是必需的。
 
 也可以显式指定入口覆盖默认路径：
 
@@ -111,7 +111,7 @@ pnpm dist:linux        # Linux：AppImage + deb
 pnpm dist:dir          # 快速验证：仅产出未打包的 .app，不生成 dmg/zip
 ```
 
-`electron-builder.yml` 通过 `extraResources` 把 `resources/dsh-standalone`（`pnpm run prepare:runtime` 填充的包装目录）复制到打包产物的 `Resources/dsh-standalone`；打包后的应用与开发模式一样，用 Electron 内置 Node 拉起该目录 `runtime/` 里的 `lib/bin.js` 启动 `dsh web`，不依赖系统 Node。
+`electron-builder.yml` 通过 `extraResources` 把 `resources/dsh`（`pnpm run prepare:runtime` 填充的包装目录）复制到打包产物的 `Resources/dsh`；打包后的应用与开发模式一样，用 Electron 内置 Node 拉起该目录 `runtime/` 里的 `lib/bin.js` 启动 `dsh web`，不依赖系统 Node。
 
 macOS 双架构：payload（`resources/dsh-<arch>`，`pnpm run bundle` 的产物）是**架构绑定**的——bundle 阶段 pnpm 只链接安装机器架构的原生分包（koffi、sharp、node-addon-require-builtin），所以哪套架构的 payload 就必须在哪套架构的机器上 bundle。填充包装目录（`prepare:runtime`）与 electron-builder 出包是架构无关的，可以在任意机器执行。因此：
 

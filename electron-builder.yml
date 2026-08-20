@@ -35,13 +35,17 @@ extraResources:
   # flattened + slimmed resources/dsh-<arch> payload that `pnpm run bundle`
   # produces.
   #
-  # `from` is resources/dsh-standalone (NOT .../runtime) so the runtime's
-  # node_modules is a SUB-directory of the copy source: electron-builder's file
-  # filter hard-excludes a source's root-level node_modules, which would drop
-  # the entire bundled dsh runtime (and with it lib/bin.js). The filter keeps
-  # the copy to the runtime subtree.
-  - from: resources/dsh-standalone
-    to: dsh-standalone
+  # `to: dsh` (not a deeper name) keeps the installed tree short — the runtime
+  # carries deep @opentelemetry paths, and NSIS extraction plus Explorer's
+  # unzip both fail past Windows' 260-char MAX_PATH.
+  #
+  # `from` is resources/dsh (NOT .../runtime) so the runtime's node_modules is
+  # a SUB-directory of the copy source: electron-builder's file filter
+  # hard-excludes a source's root-level node_modules, which would drop the
+  # entire bundled dsh runtime (and with it lib/bin.js). The filter keeps the
+  # copy to the runtime subtree.
+  - from: resources/dsh
+    to: dsh
     filter:
       - runtime{,/**/*}
 mac:

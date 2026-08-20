@@ -3,7 +3,7 @@
  * Fill the extraResources wrapper dir with a bundled dsh runtime:
  *
  *   resources/dsh-<arch>              bundled + flattened + slimmed payload
- *     -> resources/dsh-standalone/runtime
+ *     -> resources/dsh/runtime
  *
  * The wrapper dir exists because electron-builder's file filter hard-excludes
  * a copy source's root-level node_modules, so the runtime must live one level
@@ -11,6 +11,10 @@
  * (src/main/index.ts). The copy itself is architecture-independent, so
  * `--arch arm64` can fill the wrapper from a payload bundled on an arm64
  * machine (see README's macOS dual-arch flow).
+ *
+ * The short `dsh` name (instead of e.g. dsh-standalone/runtime) keeps the
+ * installed tree under Windows' 260-char MAX_PATH; deep @opentelemetry paths
+ * inside the runtime would otherwise overflow it.
  *
  * Usage:
  *   node scripts/prepare-runtime.mjs [--arch <x64|arm64>]
@@ -20,7 +24,10 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const wrapperDir = join(projectRoot, 'resources', 'dsh-standalone', 'runtime')
+// Keeps the runtime under resources/dsh/runtime: extraResources copies the
+// whole resources/dsh tree filtered to the runtime subtree (see
+// electron-builder.yml), and the main process reads resources/dsh/runtime.
+const wrapperDir = join(projectRoot, 'resources', 'dsh', 'runtime')
 
 function fail(message) {
   console.error(`prepare-runtime: ${message}`)

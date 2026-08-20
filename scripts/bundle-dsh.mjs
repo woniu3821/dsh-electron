@@ -225,10 +225,13 @@ function deploy() {
 export function verifyDeployedClosure(deployedNm, closure) {
   const scopeDir = join(deployedNm, '@deepseek-ai')
   const deployed = new Set()
+  // Check package.json existence instead of Dirent.isDirectory(): pnpm's
+  // deploy layout may expose workspace packages as junctions/symlinks (or the
+  // filesystem may not have settled stat metadata right after deploy), and
+  // Dirent does not follow links — both would silently count as absent.
   if (existsSync(scopeDir)) {
-    for (const entry of readdirSync(scopeDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      if (existsSync(join(scopeDir, entry.name, 'package.json'))) deployed.add(`@deepseek-ai/${entry.name}`)
+    for (const name of readdirSync(scopeDir)) {
+      if (existsSync(join(scopeDir, name, 'package.json'))) deployed.add(`@deepseek-ai/${name}`)
     }
   }
   const expected = new Set(closure)
@@ -424,11 +427,114 @@ function copyPackageFiles(srcDir, dstDir) {
   }
 }
 
+/** Parse `x.y.z` into [major, minor, patch]; null when not a plain semver. */
+function parseVersion(value) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(String(value).trim())
+  return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+
+/** Compare two parsed versions: -1, 0, 1. */
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1
+  }
+  return 0
+}
+
+/**
+ * Minimal semver range check (^ ~ >= <= > < =, bare versions, * / x, `||`,
+ * space-separated AND groups). Unparsable shapes are treated as satisfied so
+ * a hoist decision can never hard-fail the build on an unknown range.
+ */
+function satisfiesRange(version, range) {
+  const v = parseVersion(version)
+  if (v === null) return true
+  return String(range)
+    .split('||')
+    .some((alternative) =>
+      alternative
+        .trim()
+        .split(/\s+/)
+        .every((token) => {
+          if (token === '' || /^[xX*]$/.test(token)) return true
+          const match = /^(\^|~|>=|<=|>|<|=)?\s*(.+)$/.exec(token)
+          if (match === null) return false
+          const operator = match[1] ?? '='
+          const need = parseVersion(match[2].replace(/[xX*]/g, '0'))
+          if (need === null) return true
+          switch (operator) {
+            case '^':
+              return (
+                compareVersions(v, need) >= 0 &&
+                (need[0] > 0
+                  ? v[0] === need[0]
+                  : need[1] > 0
+                    ? v[1] === need[1] && v[2] >= need[2]
+                    : v[2] >= need[2])
+              )
+            case '~':
+              return compareVersions(v, need) >= 0 && v[0] === need[0] && v[1] === need[1]
+            case '>=':
+              return compareVersions(v, need) >= 0
+            case '<=':
+              return compareVersions(v, need) <= 0
+            case '>':
+              return compareVersions(v, need) > 0
+            case '<':
+              return compareVersions(v, need) < 0
+            default:
+              return compareVersions(v, need) === 0
+          }
+        }),
+    )
+}
+
+/** The version a pnpm depPath pins: `@scope+name@1.2.3` -> `1.2.3`. */
+function depPathVersion(depPath) {
+  return depPath.split('@').pop()
+}
+
+/** Ancestor package directories from the referrer up to (not including) dstNm. */
+function packageChain(dstNm, ownerDir) {
+  const chain = []
+  if (ownerDir === null) return chain
+  let dir = ownerDir
+  while (dir !== undefined && dir.startsWith(dstNm)) {
+    if (existsSync(join(dir, 'package.json'))) chain.push(dir)
+    if (dir === dstNm) break
+    dir = dirname(dir)
+  }
+  return chain
+}
+
+/** Declared dependency range of a package directory for `alias`, or undefined. */
+const declaredRangeCache = new Map()
+function declaredRange(pkgDir, alias) {
+  const key = join(pkgDir, alias)
+  if (!declaredRangeCache.has(key)) {
+    let range
+    try {
+      const pkg = readJson(join(pkgDir, 'package.json'))
+      range = pkg.dependencies?.[alias] ?? pkg.peerDependencies?.[alias] ?? pkg.optionalDependencies?.[alias]
+    } catch {
+      range = undefined
+    }
+    declaredRangeCache.set(key, range)
+  }
+  return declaredRangeCache.get(key)
+}
+
 /**
  * Rewrite a pnpm isolated node_modules (`.pnpm` store + symlinks) into a flat,
  * link-free layout that survives cpSync/electron-builder/NSIS packaging.
  * Hoists each dependency to the top level; on a version conflict it is nested
  * under the referring package's own node_modules, mirroring Node's resolution.
+ *
+ * Conflicted versions are hoisted to the shallowest ancestor package that
+ * accepts them (checked against every package between the referrer and that
+ * level, since the hoisted copy shadows their resolution too). This collapses
+ * deep conflict chains (e.g. A -> B -> C -> D) to one nesting level, keeping
+ * packaged paths short enough for Windows' 260-char MAX_PATH limit.
  */
 export function flattenNodeModules(srcNm, dstNm) {
   const pkgInfo = collectPackages(srcNm)
@@ -451,7 +557,26 @@ export function flattenNodeModules(srcNm, dstNm) {
       return
     }
     if (topPlaced.get(alias) === depPath) return
-    // Top level already holds a different version: nest under the referrer.
+    // Top level already holds a different version: nest, hoisting to the
+    // shallowest ancestor package whose declared range accepts this version.
+    const chain = packageChain(dstNm, ownerDir)
+    for (let i = 0; i < chain.length; i++) {
+      const acceptable = chain.slice(0, i + 1).every((pkgDir) => {
+        const range = declaredRange(pkgDir, alias)
+        return range === undefined || satisfiesRange(depPathVersion(depPath), range)
+      })
+      if (!acceptable) break
+      const key = join(chain[i], 'node_modules', alias)
+      if (nestPlaced.has(key)) {
+        if (nestPlaced.get(key) === depPath) return
+        break // occupied by another version: shallower copies would be shadowed by it
+      }
+      nestPlaced.set(key, depPath)
+      materialize(depPath, key)
+      return
+    }
+    // No ancestor accepts the version: nest directly under the referrer
+    // (deepest natural position, matching Node's resolution order).
     const nestNm = ownerDir === null ? dstNm : join(ownerDir, 'node_modules')
     const key = join(nestNm, alias)
     if (!nestPlaced.has(key)) {
@@ -477,23 +602,122 @@ export function flattenNodeModules(srcNm, dstNm) {
 }
 
 /**
+ * Hoist nested packages to the shallowest safe level in an already-flat
+ * node_modules tree (pnpm 11's flat deploy layout, or flattenNodeModules
+ * output). Deep conflict chains (e.g. A -> B -> C -> D) otherwise install to
+ * paths past Windows' 260-char MAX_PATH once inside the packaged app.
+ *
+ * Safety mirrors flattenNodeModules: a hoist may only shadow packages whose
+ * declared dependency range accepts the hoisted version, so every package
+ * between the referrer and the target level is checked. Redundant nests whose
+ * version already exists at a shallower level are simply removed.
+ */
+export function hoistNestedPackages(nm) {
+  const nested = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const p = join(dir, entry.name)
+      if (entry.name === 'node_modules') {
+        if (existsSync(join(dir, 'package.json'))) nested.push(p)
+        else walk(p)
+      } else {
+        walk(p)
+      }
+    }
+  }
+  walk(nm)
+  // Deepest first: hoisting a deep package empties the levels above it, so
+  // shallower nests are processed after their contents have moved out.
+  nested.sort((a, b) => b.length - a.length)
+  let hoisted = 0
+  for (const nmDir of nested) {
+    for (const entry of readdirSync(nmDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+      const p = join(nmDir, entry.name)
+      if (entry.name.startsWith('@')) {
+        for (const scoped of readdirSync(p, { withFileTypes: true })) {
+          if (scoped.isDirectory() && !scoped.isSymbolicLink() && existsSync(join(p, scoped.name, 'package.json'))) {
+            if (hoistOne(nm, nmDir, `${entry.name}/${scoped.name}`)) hoisted++
+          }
+        }
+        try {
+          if (readdirSync(p).length === 0) rmSync(p, { recursive: true, force: true })
+        } catch {
+          /* raced with removal above */
+        }
+      } else if (existsSync(join(p, 'package.json'))) {
+        if (hoistOne(nm, nmDir, entry.name)) hoisted++
+      }
+    }
+    try {
+      if (readdirSync(nmDir).length === 0) rmSync(nmDir, { recursive: true, force: true })
+    } catch {
+      /* empty already */
+    }
+  }
+  if (hoisted > 0) console.log(`bundle-dsh: hoisted ${hoisted} nested packages to shorter paths`)
+}
+
+/**
+ * Try to move `ownerNmDir/<alias>` to the shallowest ancestor level that
+ * accepts its version (top level first, then each ancestor package, deepest
+ * last). Returns true when the package moved or a redundant copy was removed.
+ */
+function hoistOne(nm, ownerNmDir, alias) {
+  const nestedPkg = join(ownerNmDir, alias)
+  const version = readJson(join(nestedPkg, 'package.json')).version
+  const ownerDir = dirname(ownerNmDir)
+  const chain = packageChain(nm, ownerDir) // deepest -> shallowest
+  // Candidate levels, shallowest first: top level, then each ancestor's
+  // node_modules from shallow to deep. The affected packages of a level are
+  // the referrer chain up to (and including) that level's owner.
+  const candidates = [{ dir: nm, affected: chain }]
+  for (let i = chain.length - 1; i >= 0; i--) {
+    candidates.push({ dir: join(chain[i], 'node_modules'), affected: chain.slice(0, i + 1) })
+  }
+  for (const cand of candidates) {
+    const key = join(cand.dir, alias)
+    if (existsSync(key)) {
+      if (readJson(join(key, 'package.json')).version === version) {
+        rmSync(nestedPkg, { recursive: true, force: true })
+        return true // redundant nest; resolution now finds the shallower copy
+      }
+      continue // occupied by a different version: only a deeper level fits
+    }
+    const accepted = cand.affected.every((pkgDir) => {
+      const range = declaredRange(pkgDir, alias)
+      return range === undefined || satisfiesRange(version, range)
+    })
+    if (!accepted) continue
+    mkdirSync(dirname(key), { recursive: true })
+    renameSync(nestedPkg, key)
+    console.log(`bundle-dsh: hoisted ${alias}@${version} -> ${relative(nm, key)}`)
+    return true
+  }
+  return false
+}
+
+/**
  * Prepare a deployed payload in place so it is directly packagable: flatten
  * its node_modules from pnpm's virtual-store layout (.pnpm store + top-level
- * symlinks) into a link-free tree, then strip non-runnable files (types/docs/
- * tests) and foreign native prebuild variants. Runs at the end of bundle;
+ * symlinks) into a link-free tree, hoist nested packages to shorter paths
+ * (Windows MAX_PATH), then strip non-runnable files (types/docs/tests) and
+ * foreign native prebuild variants. Runs at the end of bundle;
  * scripts/prepare-runtime.mjs then copies the result into the extraResources
  * wrapper dir.
  */
 export function preparePayload(payloadDir, platform, arch) {
   const nm = join(payloadDir, 'node_modules')
   const tmp = join(payloadDir, '.node_modules.pnpm')
-  if (existsSync(join(nm, '.pnpm'))) {
+  if (existsSync(join(nm, '.pnpm')) && readdirSync(join(nm, '.pnpm')).length > 0) {
     renameSync(nm, tmp)
     flattenNodeModules(tmp, nm)
     rmrf(tmp)
   } else {
     console.log('bundle-dsh: node_modules already link-free, skipping flatten')
   }
+  hoistNestedPackages(nm)
   slimRuntime(payloadDir)
   slimNativeVariants(payloadDir, platform, arch)
 }

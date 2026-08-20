@@ -3,7 +3,7 @@
  *
  * The Harness ships as a separate project. This shell launches its packaged
  * `dsh web` child process — the bundled runtime under
- * resources/dsh-standalone/runtime, run with Electron's own embedded Node via
+ * resources/dsh/runtime, run with Electron's own embedded Node via
  * ELECTRON_RUN_AS_NODE — waits for its readiness line, then loads the served
  * URL in a BrowserWindow. The child process owns all agent work; this process
  * only owns the window and the child's lifecycle.
@@ -44,8 +44,8 @@ interface DshLaunch {
 /** The deployed dsh CLI entry (`lib/bin.js`) inside the bundled runtime. */
 function bundledBinPath(): string {
   const dir = app.isPackaged
-    ? join(process.resourcesPath, 'dsh-standalone', 'runtime')
-    : join(__dirname, '..', '..', 'resources', 'dsh-standalone', 'runtime')
+    ? join(process.resourcesPath, 'dsh', 'runtime')
+    : join(__dirname, '..', '..', 'resources', 'dsh', 'runtime')
   return join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 }
 
@@ -57,7 +57,7 @@ function bundledBinPath(): string {
  * bundling a separate Node runtime: it spawns `process.execPath` with
  * `ELECTRON_RUN_AS_NODE=1` and `--expose-internals` (dsh's plugin loader only
  * falls back to Node's internal ESM loader when that flag is present), pointing
- * at the deployed runtime's `lib/bin.js` under `resources/dsh-standalone/runtime`.
+ * at the deployed runtime's `lib/bin.js` under `resources/dsh/runtime`.
  * This drops the ~90MB standalone Node from the installer.
  *
  * Precedence: `DSH_EXE` (run an external binary as-is), `DSH_BIN` (run a
